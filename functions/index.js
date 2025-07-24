@@ -7,17 +7,17 @@ const db = admin.firestore();
 
 // 當交易紀錄有任何變動時，觸發此函式
 exports.recalculateHoldings = functions.firestore
-    .document("artifacts/{projectId}/users/{userId}/transactions/{transactionId}")
+    .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
-        const { projectId, userId } = context.params;
+        const { userId } = context.params;
 
         console.log(`Recalculating holdings for user: ${userId}`);
 
-        const holdingsDocRef = db.doc(`artifacts/${projectId}/users/${userId}/user_data/current_holdings`);
-        const historyDocRef = db.doc(`artifacts/${projectId}/users/${userId}/user_data/portfolio_history`);
+        const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
+        const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
 
         // 1. 獲取該使用者的所有交易紀錄
-        const transactionsRef = db.collection(`artifacts/${projectId}/users/${userId}/transactions`);
+        const transactionsRef = db.collection(`users/${userId}/transactions`);
         const snapshot = await transactionsRef.get();
         const transactions = snapshot.docs.map(doc => doc.data());
 
@@ -33,7 +33,7 @@ exports.recalculateHoldings = functions.firestore
         }
 
         // 2. 獲取市場資料 (股價和匯率)
-        const marketData = await getMarketDataFromDb(projectId, transactions);
+        const marketData = await getMarketDataFromDb(transactions);
 
         // 3. 計算當前持股
         const { holdings, realizedPL } = calculateCurrentHoldings(transactions, marketData);
@@ -46,7 +46,7 @@ exports.recalculateHoldings = functions.firestore
         });
     });
 
-async function getMarketDataFromDb(projectId, transactions) {
+async function getMarketDataFromDb(transactions) {
     const marketData = {};
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
     const allSymbols = [...symbols, "TWD=X"];
@@ -56,7 +56,7 @@ async function getMarketDataFromDb(projectId, transactions) {
         const collectionName = isForex ? "exchange_rates" : "price_history";
         const fieldName = isForex ? "rates" : "prices";
         
-        const docRef = db.doc(`public_data/${projectId}/${collectionName}/${symbol}`);
+        const docRef = db.doc(`public_data/${collectionName}/${symbol}`);
         const doc = await docRef.get();
         if (doc.exists) {
             marketData[symbol] = doc.data()[fieldName] || {};
