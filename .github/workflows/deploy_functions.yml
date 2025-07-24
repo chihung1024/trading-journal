@@ -20,9 +20,7 @@ jobs:
         with:
           node-version: 18
 
-      - name: Install Functions Dependencies
-        run: npm install
-        working-directory: ./functions
+      
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
