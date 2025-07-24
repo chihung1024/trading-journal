@@ -130,7 +130,11 @@ function calculateCurrentHoldings(transactions, marketData) {
 }
 
 function findPriceForDate(history, targetDate) {
-    if (!history) return null;
+    if (!history || Object.keys(history).length === 0) return null;
+
+    const sortedDates = Object.keys(history).sort();
+    const targetDateStr = targetDate.toISOString().split('T')[0];
+
     for (let i = 0; i < 7; i++) {
         const d = new Date(targetDate);
         d.setDate(d.getDate() - i);
@@ -139,5 +143,18 @@ function findPriceForDate(history, targetDate) {
             return history[d_str];
         }
     }
+
+    let closestDate = null;
+    for (const dateStr of sortedDates) {
+        if (dateStr <= targetDateStr) {
+            closestDate = dateStr;
+        } else {
+            break;
+        }
+    }
+    if (closestDate) {
+        return history[closestDate];
+    }
+
     return null;
 }
