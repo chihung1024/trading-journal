@@ -31,7 +31,7 @@ if not PROJECT_ID:
 def get_all_user_ids():
     """獲取所有存在過資料的使用者ID"""
     user_ids = set()
-    users_ref = db.collection("artifacts", PROJECT_ID, "users")
+    users_ref = db.collection("users")
     for user_doc in users_ref.stream():
         user_ids.add(user_doc.id)
     return list(user_ids)
@@ -42,8 +42,8 @@ def get_all_user_transactions():
     transactions_group = db.collection_group("transactions")
     for trans_doc in transactions_group.stream():
         path_parts = trans_doc.reference.path.split('/')
-        if len(path_parts) >= 5 and path_parts[0] == 'artifacts' and path_parts[2] == 'users':
-            uid = path_parts[3]
+        if len(path_parts) >= 3 and path_parts[0] == 'users':
+            uid = path_parts[1]
             if uid not in all_transactions:
                 all_transactions[uid] = []
             
@@ -70,7 +70,7 @@ def fetch_and_update_market_data(symbols):
     for symbol in all_symbols:
         is_forex = symbol == "TWD=X"
         collection_name = "exchange_rates" if is_forex else "price_history"
-        doc_ref = db.collection("public_data", PROJECT_ID, collection_name).document(symbol)
+        doc_ref = db.collection("public_data", collection_name).document(symbol)
         
         start_date = None
         try:
@@ -117,7 +117,7 @@ def get_market_data_from_db(symbols):
         collection_name = "exchange_rates" if is_forex else "price_history"
         field_name = "rates" if is_forex else "prices"
         
-        doc_ref = db.collection("public_data", PROJECT_ID, collection_name).document(symbol)
+        doc_ref = db.collection("public_data", collection_name).document(symbol)
         doc = doc_ref.get()
         if doc.exists:
             market_data[symbol] = doc.to_dict().get(field_name, {})
@@ -137,7 +137,7 @@ def find_price_for_date(history, target_date_str):
 
 def calculate_and_save_portfolio_history(uid, transactions, market_data):
     """增量計算投資組合歷史"""
-    history_doc_ref = db.collection("artifacts", PROJECT_ID, "users", uid, "user_data").document("portfolio_history")
+    history_doc_ref = db.collection("users", uid, "user_data").document("portfolio_history")
 
     # 如果沒有交易，清空歷史紀錄並返回
     if not transactions:
