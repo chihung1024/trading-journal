@@ -90,7 +90,7 @@ def fetch_and_update_market_data(symbols):
                 field_name = "rates" if is_forex else "prices"
                 update_payload = { f"{field_name}.{k}": v for k, v in new_prices.items() }
                 update_payload["lastUpdated"] = datetime.now().isoformat()
-                doc_ref.update(update_payload)
+                doc_ref.set(update_payload, merge=True)
                 print(f"成功更新 {symbol} 的資料 ({len(new_prices)} 筆)。")
             else:
                 print(f"找不到 {symbol} 在 {start_date.strftime('%Y-%m-%d')}之後的新資料。")
