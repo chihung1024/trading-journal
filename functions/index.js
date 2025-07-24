@@ -69,8 +69,8 @@ async function getMarketDataFromDb(transactions) {
         const doc = await docRef.get();
 
         if (doc.exists) {
-            const fieldName = isForex ? "rates" : "prices";
-            marketData[symbol] = doc.data()[fieldName] || {};
+            // 【修正】直接獲取整個文檔，確保 prices 和 splits 都被讀取
+            marketData[symbol] = doc.data();
         } else {
             // 【智慧升級】如果資料不存在，立即觸發即時抓取
             console.log(`Market data for ${symbol} not found in DB. Fetching from API...`);
