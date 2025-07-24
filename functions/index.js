@@ -144,7 +144,7 @@ async function fetchAndSaveMarketData(symbol) {
 function calculateCurrentHoldings(transactions, marketData) {
     const holdings = {};
     let totalRealizedPL = 0;
-    const rateHistory = marketData["TWD=X"]?.prices || {};
+    const rateHistory = marketData["TWD=X"]?.rates || {};
     console.log(`取得匯率歷史，共 ${Object.keys(rateHistory).length} 筆`);
 
     const allSymbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -262,18 +262,29 @@ function calculateCurrentHoldings(transactions, marketData) {
 function findPriceForDate(history, targetDate) {
     if (!history || Object.keys(history).length === 0) return null;
 
-    const sortedDates = Object.keys(history).sort();
-    const targetDateStr = targetDate.toISOString().split('T')[0];
+    // Create a new date object to avoid modifying the original
+    const adjustedDate = new Date(targetDate.getTime());
 
+    // Add 12 hours to push the date into the correct day, compensating for timezone offsets.
+    // A user in UTC+8 entering '2009-03-03 00:00:00' gets stored as '2009-03-02 16:00:00Z'.
+    // Adding 12 hours makes it '2009-03-03 04:00:00Z'.
+    // toISOString().split('T')[0] will now correctly be '2009-03-03'.
+    adjustedDate.setUTCHours(adjustedDate.getUTCHours() + 12);
+    
+    const targetDateStr = adjustedDate.toISOString().split('T')[0];
+
+    // Now, search backwards from the adjusted date for up to 7 days
     for (let i = 0; i < 7; i++) {
-        const d = new Date(targetDate);
-        d.setDate(d.getDate() - i);
+        const d = new Date(adjustedDate.getTime());
+        d.setUTCDate(d.getUTCDate() - i);
         const d_str = d.toISOString().split('T')[0];
         if (history[d_str]) {
             return history[d_str];
         }
     }
 
+    // Fallback to find the last available date before the target date
+    const sortedDates = Object.keys(history).sort();
     let closestDate = null;
     for (const dateStr of sortedDates) {
         if (dateStr <= targetDateStr) {
