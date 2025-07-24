@@ -73,6 +73,27 @@ def fetch_and_save_data(symbols):
     except Exception as e:
         print(f"抓取匯率時發生錯誤: {e}")
 
+    # 將所有股價資料存入 Firestore
+    for symbol, prices in price_data.items():
+        if symbol != "USD_TWD":
+            price_history_dict = {k.strftime('%Y-%m-%d'): v for k, v in prices.items()}
+            doc_ref = db.collection(f"public_data/{PROJECT_ID}/price_history").document(symbol)
+            doc_ref.set({
+                "prices": price_history_dict,
+                "lastUpdated": datetime.now().isoformat()
+            })
+            print(f"成功儲存 {symbol} 的股價資料。")
+
+    # 儲存匯率資料
+    if "USD_TWD" in price_data:
+        rate_history_dict = {k.strftime('%Y-%m-%d'): v for k, v in price_data["USD_TWD"].items()}
+        doc_ref = db.collection(f"public_data/{PROJECT_ID}/exchange_rates").document("USD_TWD")
+        doc_ref.set({
+            "rates": rate_history_dict,
+            "lastUpdated": datetime.now().isoformat()
+        })
+        print("成功儲存 USD/TWD 匯率資料。")
+
     return price_data
 
 def find_price_for_date(history, target_date):
@@ -93,10 +114,8 @@ def calculate_and_save_portfolio_history(uid, transactions, market_data):
     first_date = datetime.strptime(transactions[0]['date'], '%Y-%m-%d').date()
     today = datetime.now().date()
     
-    # 預先處理匯率
     rate_history_raw = market_data.get("USD_TWD", {})
     rate_history = {k.date(): v for k, v in rate_history_raw.items()}
-
 
     d = first_date
     while d <= today:
@@ -134,8 +153,8 @@ def calculate_and_save_portfolio_history(uid, transactions, market_data):
         
         d += timedelta(days=1)
 
-    # 儲存計算結果到 Firestore
-    doc_ref = db.collection(f"artifacts/{PROJECT_ID}/users/{uid}").document("portfolio_history")
+    # **關鍵修改：使用新的、正確的資料庫路徑**
+    doc_ref = db.collection(f"artifacts/{PROJECT_ID}/users/{uid}/user_data").document("portfolio_history")
     doc_ref.set({"history": portfolio_history})
     print(f"成功儲存使用者 {uid} 的資產歷史。")
 
@@ -156,4 +175,3 @@ if __name__ == "__main__":
             calculate_and_save_portfolio_history(uid, transactions, market_data)
 
     print("所有資料更新完成！")
-
