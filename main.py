@@ -28,6 +28,14 @@ except ValueError:
 if not PROJECT_ID:
     raise ValueError("無法確定 Firebase Project ID，請檢查服務帳號憑證。")
 
+def get_all_user_ids():
+    """獲取所有存在過資料的使用者ID"""
+    user_ids = set()
+    users_ref = db.collection("artifacts", PROJECT_ID, "users")
+    for user_doc in users_ref.stream():
+        user_ids.add(user_doc.id)
+    return list(user_ids)
+
 def get_all_user_transactions():
     """使用 collection_group 查詢獲取所有使用者的交易紀錄並按使用者分組"""
     all_transactions = {}
@@ -129,12 +137,15 @@ def find_price_for_date(history, target_date_str):
 
 def calculate_and_save_portfolio_history(uid, transactions, market_data):
     """增量計算投資組合歷史"""
+    history_doc_ref = db.collection("artifacts", PROJECT_ID, "users", uid, "user_data").document("portfolio_history")
+
+    # 如果沒有交易，清空歷史紀錄並返回
     if not transactions:
+        print(f"使用者 {uid} 已無交易紀錄，正在清空其資產歷史...")
+        history_doc_ref.set({"history": {}})
         return
 
     print(f"正在為使用者 {uid} 計算資產歷史...")
-    history_doc_ref = db.collection("artifacts", PROJECT_ID, "users", uid, "user_data").document("portfolio_history")
-    
     try:
         history_doc = history_doc_ref.get()
         portfolio_history = history_doc.to_dict().get("history", {}) if history_doc.exists else {}
@@ -198,25 +209,28 @@ def calculate_and_save_portfolio_history(uid, transactions, market_data):
 
 if __name__ == "__main__":
     print("開始執行每日資料更新腳本...")
-    all_user_transactions = get_all_user_transactions()
     
+    # 獲取所有有交易紀錄的使用者
+    transactions_by_user = get_all_user_transactions()
     all_symbols = set()
-    for uid, transactions in all_user_transactions.items():
+    for uid, transactions in transactions_by_user.items():
         for t in transactions:
             all_symbols.add(t['symbol'].upper())
 
-    if not all_symbols:
-        print("找不到任何交易紀錄，無需更新。")
-    else:
-        # 1. 增量更新所有需要的市場資料
+    # 更新市場資料
+    if all_symbols:
         fetch_and_update_market_data(all_symbols)
-        
-        # 2. 從 DB 一次性讀取所有更新後的市場資料
         market_data = get_market_data_from_db(all_symbols)
-        
-        # 3. 為每個使用者增量計算資產歷史
-        for uid, transactions in all_user_transactions.items():
-            if transactions:
-                calculate_and_save_portfolio_history(uid, transactions, market_data)
+    else:
+        market_data = {}
+        print("找不到任何交易紀錄，無需更新市場資料。")
+
+    # 獲取所有存在過的使用者，以處理已清空交易的使用者
+    all_user_ids = get_all_user_ids()
+
+    # 為所有使用者（包括已無交易者）更新資產歷史
+    for uid in all_user_ids:
+        user_transactions = transactions_by_user.get(uid, [])
+        calculate_and_save_portfolio_history(uid, user_transactions, market_data)
 
     print("所有資料更新完成！")
