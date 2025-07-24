@@ -187,12 +187,15 @@ function calculateCurrentHoldings(transactions, marketData) {
                     quantity += t_quantity;
                 } else if (t.type === 'sell') {
                     const avgCostOriginal = quantity > 0 ? totalCostOriginal / quantity : 0;
+                    const costOfSoldSharesOriginal = avgCostOriginal * t_quantity;
+
                     const avgCostTWD = quantity > 0 ? totalCostTWD / quantity : 0;
+                    const costOfSoldSharesTWD = avgCostTWD * t_quantity;
                     
-                    totalCostOriginal -= avgCostOriginal * t_quantity;
-                    totalCostTWD -= avgCostTWD * t_quantity;
+                    totalCostOriginal -= costOfSoldSharesOriginal;
+                    totalCostTWD -= costOfSoldSharesTWD;
                     
-                    realizedPLTWD += (t_quantity * t_price * costRate) - (avgCostTWD * t_quantity);
+                    realizedPLTWD += (t_quantity * t_price * costRate) - costOfSoldSharesTWD;
                     quantity -= t_quantity;
 
                 } else if (t.type === 'dividend') {
