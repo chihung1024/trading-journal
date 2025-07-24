@@ -174,7 +174,7 @@ function calculateCurrentHoldings(transactions, marketData) {
         for (const event of events) {
             if (event.eventType === 'transaction') {
                 const t = event;
-                const transactionDate = t.date;
+                const transactionDate = t.date.toDate ? t.date.toDate() : new Date(t.date);
                 const t_quantity = t.quantity || 0;
                 const t_price = t.price || 0;
                 const rate = findPriceForDate(rateHistory, transactionDate) || 1;
