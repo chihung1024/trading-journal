@@ -153,7 +153,7 @@ function calculateCurrentHoldings(transactions, marketData) {
         console.log(`--- 開始計算股票: ${symbol} ---`);
         const symbolTransactions = transactions.filter(t => t.symbol.toUpperCase() === symbol);
         const priceHistory = marketData[symbol]?.prices || {};
-        const splitHistory = marketData[symbol]?.splits || {};
+        const splitHistory = marketData[symbol]?.splits || {}; // 安全地讀取 splits，如果不存在則為空物件
         const currency = symbolTransactions[0]?.currency || 'TWD';
         console.log(`幣別為: ${currency}`);
 
@@ -211,6 +211,7 @@ function calculateCurrentHoldings(transactions, marketData) {
                     symbolRealizedPLTWD += valueTWD;
                 }
             } else if (event.eventType === 'split') {
+                console.log(`處理 ${symbol} 在 ${event.date.toISOString().split('T')[0]} 的拆股，比例為: ${event.splitRatio}`);
                 currentShares *= event.splitRatio;
             }
         }
