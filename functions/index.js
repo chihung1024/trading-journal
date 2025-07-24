@@ -201,7 +201,8 @@ function calculateCurrentHoldings(transactions, marketData) {
         // 4. 計算最終持股數據
         if (quantity > 1e-9) {
             const currentPrice = findPriceForDate(priceHistory, new Date());
-            const marketRate = symbolTransactions[0].currency === 'USD' ? latestRate : 1;
+            const currency = symbolTransactions[0].currency || 'TWD';
+            const marketRate = currency === 'USD' ? latestRate : 1;
             const marketValueTWD = quantity * currentPrice * marketRate;
             
             holdings[symbol] = {
@@ -209,7 +210,7 @@ function calculateCurrentHoldings(transactions, marketData) {
                 quantity: quantity,
                 totalCostTWD: totalCostTWD,
                 avgCostTWD: quantity > 0 ? totalCostTWD / quantity : 0,
-                currency: symbolTransactions[0].currency || 'TWD',
+                currency: currency,
                 realizedPLTWD: realizedPLTWD,
                 currentPrice: currentPrice || 0,
                 marketValueTWD: marketValueTWD,
