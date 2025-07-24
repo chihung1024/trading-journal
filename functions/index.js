@@ -92,7 +92,7 @@ function calculateCurrentHoldings(transactions, marketData) {
         const price = t.price || 0;
         const transactionDate = t.date.toDate ? t.date.toDate() : new Date(t.date);
         const rate = findPriceForDate(rateHistory, transactionDate) || 1;
-        const costRate = h.currency === 'USD' ? rate : 1;
+        const costRate = t.currency === 'USD' ? rate : 1;
 
         if (t.type === 'buy') {
             h.totalCostTWD += quantity * price * costRate;
