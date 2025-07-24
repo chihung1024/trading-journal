@@ -106,6 +106,7 @@
         let chart;
         let userId;
         let projectId;
+        let realizedPLFromSoldOff = 0; // 用於儲存已賣出股票的已實現損益
         
         let transactionsUnsubscribe = null;
         let historyUnsubscribe = null;
@@ -183,7 +184,7 @@
             if (holdingsUnsubscribe) holdingsUnsubscribe();
 
             // 監聽交易紀錄
-            const transactionsCol = collection(db, 'artifacts', projectId, 'users', userId, 'transactions');
+            const transactionsCol = collection(db, 'users', userId, 'transactions');
             const q = query(transactionsCol, orderBy("date", "asc"));
             transactionsUnsubscribe = onSnapshot(q, async (snapshot) => {
                 transactions = snapshot.docs.map(doc => {
@@ -202,12 +203,15 @@
             });
             
             // 監聽後端算好的持股資料
-            const holdingsDocRef = doc(db, 'artifacts', projectId, 'users', userId, 'user_data', 'current_holdings');
+            const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
             holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
                 if (docSnap.exists()) {
-                    holdings = docSnap.data().holdings || {};
+                    const data = docSnap.data();
+                    holdings = data.holdings || {};
+                    realizedPLFromSoldOff = data.realizedPL || 0; // 儲存已實現損益
                 } else {
                     holdings = {}; // 如果文件不存在，清空持股
+                    realizedPLFromSoldOff = 0;
                 }
                 dataLoaded.holdings = true;
                 renderAll();
@@ -217,7 +221,7 @@
             });
 
             // 監聽後端算好的資產歷史
-            const historyDocRef = doc(db, 'artifacts', projectId, 'users', userId, 'user_data', 'portfolio_history');
+            const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
             historyUnsubscribe = onSnapshot(historyDocRef, (docSnap) => {
                 if (docSnap.exists()) {
                     const portfolioHistory = docSnap.data().history;
@@ -306,7 +310,8 @@
             const holdingsArray = Object.values(holdings);
             const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
             const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
-            const totalRealizedPL = holdingsArray.reduce((sum, h) => sum + h.realizedPLTWD, 0);
+            // 修正：總已實現損益 = 持有中股票的已實現損益 + 已完全賣出股票的已實現損益
+            const totalRealizedPL = holdingsArray.reduce((sum, h) => sum + h.realizedPLTWD, 0) + realizedPLFromSoldOff;
             const totalCost = holdingsArray.reduce((sum, h) => sum + h.totalCostTWD, 0);
 
             const totalReturnOnInvestment = totalCost > 0 ? ((totalUnrealizedPL + totalRealizedPL) / totalCost) * 100 : 0;
@@ -360,7 +365,7 @@
         // --- API & 價格快取 (簡化版) ---
         async function updateExchangeRateCache() {
             const uniqueDates = [...new Set(transactions.map(t => t.date))];
-            const rateDocRef = doc(db, 'public_data', projectId, 'exchange_rates', 'USD_TWD');
+            const rateDocRef = doc(db, 'public_data', 'exchange_rates', 'TWD=X');
             
             try {
                 const docSnap = await getDoc(rateDocRef);
@@ -391,7 +396,7 @@
             };
             if (!transactionData.symbol || isNaN(transactionData.quantity) || isNaN(transactionData.price)) { showNotification('error', '請填寫所有欄位。'); return; }
 
-            const txCol = collection(db, 'artifacts', projectId, 'users', userId, 'transactions');
+            const txCol = collection(db, 'users', userId, 'transactions');
 
             try {
                 if (id) {
@@ -401,7 +406,7 @@
                 }
                 closeModal();
                 showNotification('success', id ? '交易已更新！' : '交易已新增！');
-                showNotification('info', `後端腳本將在下次排程時自動更新您的資產數據。`);
+                showNotification('info', `後端正在為您即時更新資產數據...`);
 
             } catch (error) {
                 console.error("儲存交易失敗:", error);
@@ -413,7 +418,7 @@
             const id = e.target.dataset.id;
             showConfirm('確定要刪除這筆交易紀錄嗎？', async () => {
                 try {
-                    const txCol = collection(db, 'artifacts', projectId, 'users', userId, 'transactions');
+                    const txCol = collection(db, 'users', userId, 'transactions');
                     await deleteDoc(doc(txCol, id));
                     showNotification('success', '交易紀錄已刪除。');
                 } catch (error) {
