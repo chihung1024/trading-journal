@@ -92,21 +92,26 @@ def fetch_and_update_market_data(symbols):
             print(f"正在抓取 {symbol} 從 {start_date.strftime('%Y-%m-%d')} 開始的資料...")
             stock = yf.Ticker(symbol)
             
-            # 抓取股價和分割歷史
+            # 升級的抓取邏輯：明確分開獲取歷史價格和事件
             hist = stock.history(start=start_date, interval="1d", auto_adjust=False, back_adjust=False)
-            splits = stock.splits
             
+            # 為了確保能抓到所有事件，我們可以重新獲取一次完整的事件歷史
+            all_events = stock.history(period="max", interval="1d", actions=True)
+            splits = all_events['Stock Splits'][all_events['Stock Splits'] > 0]
+
             update_payload = {}
 
             if not hist.empty:
+                # 只更新從 start_date 開始的新價格
                 new_prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items()}
                 update_payload["prices"] = new_prices
                 print(f"成功抓取 {symbol} 的 {len(new_prices)} 筆新股價。")
 
             if not splits.empty:
-                new_splits = {idx.strftime('%Y-%m-%d'): val for idx, val in splits.items()}
-                update_payload["splits"] = new_splits
-                print(f"成功抓取 {symbol} 的 {len(new_splits)} 筆分割歷史。")
+                # 更新所有歷史上的拆股數據，以確保完整性
+                all_splits_data = {idx.strftime('%Y-%m-%d'): val for idx, val in splits.items()}
+                update_payload["splits"] = all_splits_data
+                print(f"成功抓取 {symbol} 的 {len(all_splits_data)} 筆分割歷史。")
 
             if update_payload:
                 update_payload["lastUpdated"] = datetime.now().isoformat()
