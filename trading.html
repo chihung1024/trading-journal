@@ -61,11 +61,8 @@
                 <div class="card p-5 flex flex-col justify-between"><div class="flex items-center justify-between"><h3 class="text-sm font-medium text-gray-500">XIRR 年化報酬率</h3><i data-lucide="calendar-check" class="h-6 w-6 text-gray-400"></i></div><p id="xirr-value" class="text-3xl font-bold text-gray-800 mt-2">0.00%</p></div>
             </div>
 
-            <!-- Asset Growth Chart -->
-            <div class="card p-6 mb-8"><h3 class="text-lg font-semibold text-gray-800 mb-4">資產成長曲線 (TWD)</h3><div id="asset-chart"></div></div>
-
             <!-- Holdings and Transactions -->
-            <div class="card p-6">
+            <div class="card p-6 mb-8">
                 <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
                     <div class="sm:flex sm:items-center sm:space-x-4"><h2 class="text-xl font-bold text-gray-800">投資組合</h2><div class="mt-2 sm:mt-0 border-b sm:border-b-0 sm:border-l border-gray-200 sm:pl-4"><nav class="-mb-px flex space-x-6" id="tabs"><a href="#" data-tab="holdings" class="tab-item whitespace-nowrap border-b-2 font-medium text-sm border-indigo-500 text-indigo-600">持股一覽</a><a href="#" data-tab="transactions" class="tab-item whitespace-nowrap border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">交易紀錄</a></nav></div></div>
                     <button id="add-transaction-btn" class="btn bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700 flex items-center space-x-2 w-full sm:w-auto justify-center"><i data-lucide="plus-circle" class="h-5 w-5"></i><span>新增交易</span></button>
@@ -73,6 +70,9 @@
                 <div id="holdings-tab" class="tab-content overflow-x-auto"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">股數</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">平均成本(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">總成本(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">現價</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">市值(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">未實現損益(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">報酬率</th></tr></thead><tbody id="holdings-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
                 <div id="transactions-tab" class="tab-content overflow-x-auto hidden"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">日期</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">類型</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">股數</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">價格(原幣)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">總金額(TWD)</th><th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th></tr></thead><tbody id="transactions-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
             </div>
+
+            <!-- Asset Growth Chart -->
+            <div class="card p-6"><h3 class="text-lg font-semibold text-gray-800 mb-4">資產成長曲線 (TWD)</h3><div id="asset-chart"></div></div>
         </main>
 
         <!-- Modals -->
@@ -271,11 +271,11 @@
                 row.innerHTML = `
                     <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${h.symbol}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${(h.quantity || 0).toFixed(2)}</td>
-                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.avgCostTWD)}</td>
-                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.totalCostTWD)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.avgCostTWD, 0)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.totalCostTWD, 0)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.currentPrice)} <span class="text-xs text-gray-500">${h.currency}</span></td>
-                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.marketValueTWD)}</td>
-                    <td class="px-6 py-4 whitespace-nowrap font-semibold ${h.unrealizedPLTWD >= 0 ? 'text-red-600' : 'text-green-600'}">${formatCurrency(h.unrealizedPLTWD)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.marketValueTWD, 0)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap font-semibold ${h.unrealizedPLTWD >= 0 ? 'text-red-600' : 'text-green-600'}">${formatCurrency(h.unrealizedPLTWD, 0)}</td>
                     <td class="px-6 py-4 whitespace-nowrap font-semibold ${h.returnRate >= 0 ? 'text-red-600' : 'text-green-600'}">${(h.returnRate || 0).toFixed(2)}%</td>
                 `;
                 tableBody.appendChild(row);
@@ -301,13 +301,13 @@
                     const rate = exchangeRateCache.get(t.date);
                     if (rate) {
                         const totalAmountTWD = parseFloat(t.quantity) * parseFloat(t.price) * rate;
-                        totalAmountTWD_HTML = formatCurrency(totalAmountTWD);
+                        totalAmountTWD_HTML = formatCurrency(totalAmountTWD, 0);
                     } else {
                         totalAmountTWD_HTML = `<span class="text-xs text-orange-600 font-semibold">匯率資料不足</span>`;
                     }
                 } else {
                     const totalAmountTWD = parseFloat(t.quantity) * parseFloat(t.price);
-                    totalAmountTWD_HTML = formatCurrency(totalAmountTWD);
+                    totalAmountTWD_HTML = formatCurrency(totalAmountTWD, 0);
                 }
 
                 row.innerHTML = `
@@ -329,14 +329,14 @@
 
             const totalReturnOnInvestment = totalCost > 0 ? ((totalUnrealizedPL + totalRealizedPL) / totalCost) * 100 : 0;
             
-            document.getElementById('total-assets').textContent = formatCurrency(totalMarketValue);
+            document.getElementById('total-assets').textContent = formatCurrency(totalMarketValue, 0);
             
             const unrealizedEl = document.getElementById('unrealized-pl');
-            unrealizedEl.textContent = formatCurrency(totalUnrealizedPL);
+            unrealizedEl.textContent = formatCurrency(totalUnrealizedPL, 0);
             unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
             
             const realizedEl = document.getElementById('realized-pl');
-            realizedEl.textContent = formatCurrency(totalRealizedPL);
+            realizedEl.textContent = formatCurrency(totalRealizedPL, 0);
             realizedEl.className = `text-3xl font-bold mt-2 ${totalRealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
 
             const totalReturnEl = document.getElementById('total-return');
