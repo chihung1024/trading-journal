@@ -1,5 +1,6 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
+const yahooFinance = require("yahoo-finance2").default;
 
 admin.initializeApp();
 
@@ -32,7 +33,7 @@ exports.recalculateHoldings = functions.firestore
             return null; // 結束函式
         }
 
-        // 2. 獲取市場資料 (股價和匯率)
+        // 2. 獲取市場資料 (股價和匯率) - 已升級為智慧模式
         const marketData = await getMarketDataFromDb(transactions);
 
         // 3. 計算當前持股
@@ -54,15 +55,60 @@ async function getMarketDataFromDb(transactions) {
     for (const symbol of allSymbols) {
         const isForex = symbol === "TWD=X";
         const collectionName = isForex ? "exchange_rates" : "price_history";
-        const fieldName = isForex ? "rates" : "prices";
         
         const docRef = db.collection(collectionName).doc(symbol);
         const doc = await docRef.get();
+
         if (doc.exists) {
+            const fieldName = isForex ? "rates" : "prices";
             marketData[symbol] = doc.data()[fieldName] || {};
+        } else {
+            // 【智慧升級】如果資料不存在，立即觸發即時抓取
+            console.log(`Market data for ${symbol} not found in DB. Fetching from API...`);
+            const newData = await fetchAndSaveMarketData(symbol);
+            if (newData) {
+                marketData[symbol] = newData;
+            }
         }
     }
     return marketData;
+}
+
+async function fetchAndSaveMarketData(symbol) {
+    try {
+        const isForex = symbol === "TWD=X";
+        const collectionName = isForex ? "exchange_rates" : "price_history";
+        const fieldName = isForex ? "rates" : "prices";
+
+        const queryOptions = { period1: '2000-01-01' }; // 從 2000 年開始抓
+        const result = await yahooFinance.historical(symbol, queryOptions);
+
+        if (!result || result.length === 0) {
+            console.warn(`Could not fetch historical data for ${symbol} from Yahoo Finance.`);
+            return null;
+        }
+
+        const newMarketData = {};
+        for (const item of result) {
+            const dateStr = item.date.toISOString().split('T')[0];
+            newMarketData[dateStr] = item.close;
+        }
+
+        const docRef = db.collection(collectionName).doc(symbol);
+        const payload = {
+            [fieldName]: newMarketData,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            dataSource: 'yahoo-finance2-live',
+        };
+
+        await docRef.set(payload);
+        console.log(`Successfully fetched and saved ${Object.keys(newMarketData).length} data points for ${symbol}.`);
+        return newMarketData;
+
+    } catch (error) {
+        console.error(`Error fetching or saving market data for ${symbol}:`, error);
+        return null;
+    }
 }
 
 function calculateCurrentHoldings(transactions, marketData) {
