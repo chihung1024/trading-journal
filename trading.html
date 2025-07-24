@@ -295,10 +295,23 @@
                 row.className = "hover:bg-gray-50";
                 const typeText = { buy: '買入', sell: '賣出', dividend: '股息' };
                 const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' };
-                const rate = t.currency === 'USD' ? (exchangeRateCache.get(t.date) || 1) : 1;
-                const totalAmountTWD = parseFloat(t.quantity) * parseFloat(t.price) * rate;
+                
+                let totalAmountTWD_HTML;
+                if (t.currency === 'USD') {
+                    const rate = exchangeRateCache.get(t.date);
+                    if (rate) {
+                        const totalAmountTWD = parseFloat(t.quantity) * parseFloat(t.price) * rate;
+                        totalAmountTWD_HTML = formatCurrency(totalAmountTWD);
+                    } else {
+                        totalAmountTWD_HTML = `<span class="text-xs text-orange-600 font-semibold">匯率資料不足</span>`;
+                    }
+                } else {
+                    const totalAmountTWD = parseFloat(t.quantity) * parseFloat(t.price);
+                    totalAmountTWD_HTML = formatCurrency(totalAmountTWD);
+                }
+
                 row.innerHTML = `
-                    <td class="px-6 py-4 whitespace-nowrap">${t.date}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td><td class="px-6 py-4 whitespace-nowrap">${parseFloat(t.quantity).toLocaleString()}</td><td class="px-6 py-4 whitespace-nowrap">${formatCurrency(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatCurrency(totalAmountTWD)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${t.date}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td><td class="px-6 py-4 whitespace-nowrap">${parseFloat(t.quantity).toLocaleString()}</td><td class="px-6 py-4 whitespace-nowrap">${formatCurrency(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${totalAmountTWD_HTML}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${t.id}" class="edit-btn text-indigo-600 hover:text-indigo-900 mr-3">編輯</button><button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900">刪除</button></td>`;
                 tableBody.appendChild(row);
             };
@@ -465,8 +478,11 @@
         }
         function switchTab(tabName) { document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden')); document.getElementById(`${tabName}-tab`).classList.remove('hidden'); document.querySelectorAll('.tab-item').forEach(el => { el.classList.remove('border-indigo-500', 'text-indigo-600'); el.classList.add('border-transparent', 'text-gray-500'); }); const activeTab = document.querySelector(`[data-tab="${tabName}"]`); activeTab.classList.add('border-indigo-500', 'text-indigo-600'); activeTab.classList.remove('border-transparent', 'text-gray-500'); }
         function findPriceForDate(history, targetDateStr) {
-            if (!history || !targetDateStr) return 0;
+            if (!history || !targetDateStr || Object.keys(history).length === 0) return null;
+
+            const sortedDates = Object.keys(history).sort();
             const originalTargetDate = new Date(targetDateStr);
+
             for (let i = 0; i < 7; i++) {
                 const target = new Date(originalTargetDate);
                 target.setDate(target.getDate() - i);
@@ -475,7 +491,20 @@
                     return history[d_str];
                 }
             }
-            return 0;
+
+            let closestDate = null;
+            for (const dateStr of sortedDates) {
+                if (dateStr <= targetDateStr) {
+                    closestDate = dateStr;
+                } else {
+                    break;
+                }
+            }
+            if (closestDate) {
+                return history[closestDate];
+            }
+
+            return null;
         }
         function calculateXIRR(cashflows, guess = 0.1) { if (cashflows.length <= 1) return 0; const maxIterations = 100; const tolerance = 1.0e-7; let x0 = guess; for (let i = 0; i < maxIterations; i++) { let fValue = 0; let fDerivative = 0; const firstDate = cashflows[0].date; for (const cf of cashflows) { const days = (cf.date - firstDate) / (1000 * 60 * 60 * 24); fValue += cf.amount * Math.pow(1 + x0, -days / 365.0); fDerivative += (-days / 365.0) * cf.amount * Math.pow(1 + x0, (-days / 365.0) - 1); } if (Math.abs(fDerivative) < 1e-9) return NaN; const x1 = x0 - fValue / fDerivative; if (Math.abs(x1 - x0) <= tolerance) return x1; x0 = x1; } return NaN; }
     </script>
