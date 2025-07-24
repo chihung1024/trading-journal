@@ -32,21 +32,28 @@ if not PROJECT_ID:
     raise ValueError("projectId not found in firebaseConfig")
 
 def get_all_user_transactions():
-    """獲取所有使用者的交易紀錄"""
+    """**關鍵修正：使用 collection_group 查詢獲取所有使用者的交易紀錄並按使用者分組**"""
     all_transactions = {}
-    users_ref = db.collection("artifacts", PROJECT_ID, "users")
-    for user_doc in users_ref.stream():
-        uid = user_doc.id
-        transactions = []
-        transactions_ref = user_doc.reference.collection("transactions")
-        for trans_doc in transactions_ref.stream():
+    transactions_group = db.collection_group("transactions")
+    for trans_doc in transactions_group.stream():
+        # 交易文件的完整路徑類似：artifacts/{projectId}/users/{userId}/transactions/{txId}
+        path_parts = trans_doc.reference.path.split('/')
+        # 確保路徑結構正確，並從中解析出 userId
+        if len(path_parts) >= 5 and path_parts[0] == 'artifacts' and path_parts[2] == 'users':
+            uid = path_parts[3]
+            if uid not in all_transactions:
+                all_transactions[uid] = []
+            
             data = trans_doc.to_dict()
             data['id'] = trans_doc.id
-            # Firebase 的 timestamp 需要轉換
             if 'date' in data and hasattr(data['date'], 'strftime'):
                  data['date'] = data['date'].strftime('%Y-%m-%d')
-            transactions.append(data)
-        all_transactions[uid] = sorted(transactions, key=lambda x: x['date'])
+            all_transactions[uid].append(data)
+
+    # 為每位使用者將交易按日期排序
+    for uid in all_transactions:
+        all_transactions[uid] = sorted(all_transactions[uid], key=lambda x: x['date'])
+        
     return all_transactions
 
 def fetch_and_save_data(symbols):
@@ -58,7 +65,6 @@ def fetch_and_save_data(symbols):
             stock = yf.Ticker(symbol)
             hist = stock.history(period="max", interval="1d")
             if not hist.empty:
-                # 健檢修正：直接將 Timestamp key 轉為字串
                 price_data[symbol] = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items()}
                 print(f"成功抓取 {symbol}。")
         except Exception as e:
@@ -78,19 +84,13 @@ def fetch_and_save_data(symbols):
     for symbol, prices in price_data.items():
         if symbol != "USD_TWD":
             doc_ref = db.collection("public_data", PROJECT_ID, "price_history").document(symbol)
-            doc_ref.set({
-                "prices": prices,
-                "lastUpdated": datetime.now().isoformat()
-            })
+            doc_ref.set({ "prices": prices, "lastUpdated": datetime.now().isoformat() })
             print(f"成功儲存 {symbol} 的股價資料。")
 
     # 儲存匯率資料
     if "USD_TWD" in price_data:
         doc_ref = db.collection("public_data", PROJECT_ID, "exchange_rates").document("USD_TWD")
-        doc_ref.set({
-            "rates": price_data["USD_TWD"],
-            "lastUpdated": datetime.now().isoformat()
-        })
+        doc_ref.set({ "rates": price_data["USD_TWD"], "lastUpdated": datetime.now().isoformat() })
         print("成功儲存 USD/TWD 匯率資料。")
 
     return price_data
@@ -98,7 +98,7 @@ def fetch_and_save_data(symbols):
 def find_price_for_date(history, target_date_str):
     """在歷史資料中尋找特定日期的價格（若無則往前找）"""
     target_date = datetime.strptime(target_date_str, '%Y-%m-%d').date()
-    for i in range(7): # 最多回溯7天
+    for i in range(7):
         d_str = (target_date - timedelta(days=i)).strftime('%Y-%m-%d')
         if d_str in history:
             return history[d_str]
@@ -151,7 +151,6 @@ def calculate_and_save_portfolio_history(uid, transactions, market_data):
         
         d += timedelta(days=1)
 
-    # **健檢修正：使用正確的、拆段的資料庫路徑**
     doc_ref = db.collection("artifacts", PROJECT_ID, "users", uid, "user_data").document("portfolio_history")
     doc_ref.set({"history": portfolio_history})
     print(f"成功儲存使用者 {uid} 的資產歷史。")
