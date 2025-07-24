@@ -271,7 +271,7 @@
                 row.innerHTML = `
                     <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${h.symbol}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${(h.quantity || 0).toFixed(2)}</td>
-                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.avgCostTWD, 0)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.avgCost)} <span class="text-xs text-gray-500">${h.currency}</span></td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.totalCostTWD, 0)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.currentPrice)} <span class="text-xs text-gray-500">${h.currency}</span></td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.marketValueTWD, 0)}</td>
