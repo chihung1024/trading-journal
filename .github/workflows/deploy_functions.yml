@@ -15,9 +15,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: List files for debugging
-        run: ls -R
-
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
