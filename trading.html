@@ -365,7 +365,7 @@
         // --- API & 價格快取 (簡化版) ---
         async function updateExchangeRateCache() {
             const uniqueDates = [...new Set(transactions.map(t => t.date))];
-            const rateDocRef = doc(db, 'public_data', 'exchange_rates', 'TWD=X');
+            const rateDocRef = doc(db, 'exchange_rates', 'TWD=X');
             
             try {
                 const docSnap = await getDoc(rateDocRef);
