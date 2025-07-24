@@ -1,12 +1,9 @@
-# .github/workflows/update_prices.yml
 name: Update Stock Prices
 
 on:
-  # 允許手動觸發
-  workflow_dispatch:
-  # 設定排程：每天 UTC 時間 0 點執行 (約等於台灣時間早上 8 點)
+  workflow_dispatch:        # 手動執行
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'     # 每日 00:00 UTC（台灣 08:00）
 
 jobs:
   update-prices:
@@ -25,8 +22,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance firebase-admin
 
-      - name: Run price update script
+      - name: Run price-update script
         env:
-          # 將 GitHub Secret 傳遞給 Python 腳本
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: python main.py
