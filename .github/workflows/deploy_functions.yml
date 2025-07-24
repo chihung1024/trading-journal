@@ -10,25 +10,31 @@ on:
 
 jobs:
   deploy-functions:
+    # 新增權限設定，這是 Google Cloud 認證所需
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: 18
+      
+      - name: Install dependencies in functions directory
+        run: npm --prefix "./functions" install
 
-      - name: Install Firebase CLI
-        run: npm install -g firebase-tools
-
-      - name: Deploy to Firebase
-        uses: firebase-actions/github-action@v0
+      - name: Deploy to Firebase Functions
+        uses: google-github-actions/deploy-firebase@v0
         with:
-          args: deploy --only functions
-        env:
-          # 從 GitHub Secrets 讀取服務帳號，進行安全認證
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          # 指定您的 Firebase 專案 ID
-          PROJECT_ID: trading-journal-4922c
+          project_id: trading-journal-4922c
+          # 您也可以在這裡指定觸發器、區域等，但目前保持預設即可
