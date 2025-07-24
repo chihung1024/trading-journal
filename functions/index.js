@@ -145,89 +145,114 @@ function calculateCurrentHoldings(transactions, marketData) {
     const holdings = {};
     let totalRealizedPL = 0;
     const rateHistory = marketData["TWD=X"]?.prices || {};
-    const latestRate = findPriceForDate(rateHistory, new Date()) || 1;
+    console.log(`取得匯率歷史，共 ${Object.keys(rateHistory).length} 筆`);
 
     const allSymbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
     for (const symbol of allSymbols) {
+        console.log(`--- 開始計算股票: ${symbol} ---`);
         const symbolTransactions = transactions.filter(t => t.symbol.toUpperCase() === symbol);
         const priceHistory = marketData[symbol]?.prices || {};
         const splitHistory = marketData[symbol]?.splits || {};
+        const currency = symbolTransactions[0]?.currency || 'TWD';
+        console.log(`幣別為: ${currency}`);
 
-        // 1. 創建一個包含所有事件（交易和分割）的合併列表
+        // 1. 建立包含交易與分割的事件列表
         const events = [];
-        for (const t of symbolTransactions) {
-            events.push({ ...t, type: t.type, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' });
-        }
-        for (const dateStr in splitHistory) {
-            events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' });
-        }
-
-        // 2. 按日期對所有事件進行排序
+        symbolTransactions.forEach(t => events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' }));
+        Object.keys(splitHistory).forEach(dateStr => events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
         events.sort((a, b) => a.date - b.date);
 
-        // 3. 迭代事件，模擬持股變化
-        let quantity = 0;
-        let totalCostTWD = 0;
-        let totalCostOriginal = 0; // 新增：用於計算原幣總成本
-        let realizedPLTWD = 0;
+        // 2. 迭代事件，計算持股與成本
+        let currentShares = 0;
+        let totalCostOriginal = 0; // 原幣總成本
+        let totalCostTWD = 0;      // 台幣總成本
+        let realizedPLTWD = 0;     // 已實現台幣損益
+        let symbolRealizedPLTWD = 0; // 用於計算單一持股的已實現損益
 
         for (const event of events) {
             if (event.eventType === 'transaction') {
                 const t = event;
-                const transactionDate = t.date.toDate ? t.date.toDate() : new Date(t.date);
-                const t_quantity = t.quantity || 0;
-                const t_price = t.price || 0;
-                const rate = findPriceForDate(rateHistory, transactionDate) || 1;
-                const costRate = t.currency === 'USD' ? rate : 1;
+                const t_shares = parseFloat(t.quantity) || 0;
+                const t_price = parseFloat(t.price) || 0;
+                const t_date = t.date;
+                
+                let rateOnTransactionDate = 1;
+                if (currency === 'USD') {
+                    const foundRate = findPriceForDate(rateHistory, t_date);
+                    if (foundRate === null) {
+                        console.error(`FATAL: 找不到 ${symbol} 在 ${t_date.toISOString().split('T')[0]} 的匯率！成本計算將不準確！`);
+                        // 在此中斷或使用一個標記來表示錯誤，而不是靜默地使用 1
+                        rateOnTransactionDate = 1; // 保持計算，但日誌會標示錯誤
+                    } else {
+                        rateOnTransactionDate = foundRate;
+                    }
+                }
+
+                const valueOriginal = t_shares * t_price;
+                const valueTWD = valueOriginal * rateOnTransactionDate;
 
                 if (t.type === 'buy') {
-                    totalCostOriginal += t_quantity * t_price; // 計算原幣成本
-                    totalCostTWD += t_quantity * t_price * costRate; // 計算台幣成本
-                    quantity += t_quantity;
+                    currentShares += t_shares;
+                    totalCostOriginal += valueOriginal;
+                    totalCostTWD += valueTWD;
                 } else if (t.type === 'sell') {
-                    const avgCostOriginal = quantity > 0 ? totalCostOriginal / quantity : 0;
-                    const costOfSoldSharesOriginal = avgCostOriginal * t_quantity;
+                    if (currentShares > 0) {
+                        const proportionOfSharesSold = t_shares / currentShares;
+                        const costOfSoldSharesTWD = totalCostTWD * proportionOfSharesSold;
 
-                    const avgCostTWD = quantity > 0 ? totalCostTWD / quantity : 0;
-                    const costOfSoldSharesTWD = avgCostTWD * t_quantity;
-                    
-                    totalCostOriginal -= costOfSoldSharesOriginal;
-                    totalCostTWD -= costOfSoldSharesTWD;
-                    
-                    realizedPLTWD += (t_quantity * t_price * costRate) - costOfSoldSharesTWD;
-                    quantity -= t_quantity;
-
+                        symbolRealizedPLTWD += valueTWD - costOfSoldSharesTWD;
+                        
+                        totalCostOriginal *= (1 - proportionOfSharesSold);
+                        totalCostTWD *= (1 - proportionOfSharesSold);
+                        currentShares -= t_shares;
+                    }
                 } else if (t.type === 'dividend') {
-                    realizedPLTWD += t_quantity * t_price * costRate;
+                    symbolRealizedPLTWD += valueTWD;
                 }
             } else if (event.eventType === 'split') {
-                console.log(`Applying split of ${event.splitRatio} for ${symbol} on ${event.date}`);
-                quantity *= event.splitRatio;
+                currentShares *= event.splitRatio;
             }
         }
 
-        // 4. 計算最終持股數據
-        if (quantity > 1e-9) {
-            const currentPrice = findPriceForDate(priceHistory, new Date());
-            const currency = symbolTransactions[0].currency || 'TWD';
-            const marketRate = currency === 'USD' ? latestRate : 1;
-            const marketValueTWD = quantity * currentPrice * marketRate;
+        // 3. 計算最終持股數據
+        if (currentShares > 1e-9) {
+            const latestPrice = findPriceForDate(priceHistory, new Date());
+            if (latestPrice === null) {
+                console.error(`FATAL: 找不到 ${symbol} 的最新價格！將跳過此股票。`);
+                continue; // 如果沒有價格，則無法計算市值，直接跳過
+            }
+
+            let latestRate = 1;
+            if (currency === 'USD') {
+                const foundRate = findPriceForDate(rateHistory, new Date());
+                if (foundRate === null) {
+                    console.error(`FATAL: 找不到今天的匯率！市值計算將不準確！`);
+                    latestRate = 1; // 保持計算，但日誌會標示錯誤
+                } else {
+                    latestRate = foundRate;
+                }
+            }
             
+            const marketValueTWD = currentShares * latestPrice * latestRate;
+            const unrealizedPLTWD = marketValueTWD - totalCostTWD;
+            const returnRate = totalCostTWD > 0 ? (unrealizedPLTWD / totalCostTWD) * 100 : 0;
+
             holdings[symbol] = {
                 symbol: symbol,
-                quantity: quantity,
-                totalCostTWD: totalCostTWD, // 台幣總成本
-                avgCost: quantity > 0 ? totalCostOriginal / quantity : 0, // 原幣平均成本
+                quantity: currentShares,
+                avgCost: currentShares > 0 ? totalCostOriginal / currentShares : 0,
+                totalCostTWD: totalCostTWD,
                 currency: currency,
-                realizedPLTWD: realizedPLTWD,
-                currentPrice: currentPrice || 0, // 現價 (原幣)
-                marketValueTWD: marketValueTWD, // 市值 (TWD)
-                unrealizedPLTWD: marketValueTWD - totalCostTWD, // 未實現損益 (TWD)
-                returnRate: totalCostTWD > 0 ? ((marketValueTWD - totalCostTWD) / totalCostTWD) * 100 : 0,
+                currentPrice: latestPrice,
+                marketValueTWD: marketValueTWD,
+                unrealizedPLTWD: unrealizedPLTWD,
+                realizedPLTWD: symbolRealizedPLTWD, // 返回此持股本身的已實現損益
+                returnRate: returnRate,
             };
         } else {
-            totalRealizedPL += realizedPLTWD;
+            // 如果股票已全部賣出，其所有損益都已實現
+            totalRealizedPL += symbolRealizedPLTWD;
         }
     }
 
