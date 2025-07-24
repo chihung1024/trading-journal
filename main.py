@@ -34,7 +34,7 @@ if not PROJECT_ID:
 def get_all_user_transactions():
     """獲取所有使用者的交易紀錄"""
     all_transactions = {}
-    users_ref = db.collection(f"artifacts/{PROJECT_ID}/users")
+    users_ref = db.collection("artifacts", PROJECT_ID, "users")
     for user_doc in users_ref.stream():
         uid = user_doc.id
         transactions = []
@@ -58,7 +58,8 @@ def fetch_and_save_data(symbols):
             stock = yf.Ticker(symbol)
             hist = stock.history(period="max", interval="1d")
             if not hist.empty:
-                price_data[symbol] = hist['Close'].to_dict()
+                # 健檢修正：直接將 Timestamp key 轉為字串
+                price_data[symbol] = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items()}
                 print(f"成功抓取 {symbol}。")
         except Exception as e:
             print(f"抓取 {symbol} 股價時發生錯誤: {e}")
@@ -68,7 +69,7 @@ def fetch_and_save_data(symbols):
         twd_rate = yf.Ticker("TWD=X")
         hist = twd_rate.history(period="max", interval="1d")
         if not hist.empty:
-            price_data["USD_TWD"] = hist['Close'].to_dict()
+            price_data["USD_TWD"] = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items()}
             print("成功抓取 USD/TWD 匯率。")
     except Exception as e:
         print(f"抓取匯率時發生錯誤: {e}")
@@ -76,32 +77,31 @@ def fetch_and_save_data(symbols):
     # 將所有股價資料存入 Firestore
     for symbol, prices in price_data.items():
         if symbol != "USD_TWD":
-            price_history_dict = {k.strftime('%Y-%m-%d'): v for k, v in prices.items()}
-            doc_ref = db.collection(f"public_data/{PROJECT_ID}/price_history").document(symbol)
+            doc_ref = db.collection("public_data", PROJECT_ID, "price_history").document(symbol)
             doc_ref.set({
-                "prices": price_history_dict,
+                "prices": prices,
                 "lastUpdated": datetime.now().isoformat()
             })
             print(f"成功儲存 {symbol} 的股價資料。")
 
     # 儲存匯率資料
     if "USD_TWD" in price_data:
-        rate_history_dict = {k.strftime('%Y-%m-%d'): v for k, v in price_data["USD_TWD"].items()}
-        doc_ref = db.collection(f"public_data/{PROJECT_ID}/exchange_rates").document("USD_TWD")
+        doc_ref = db.collection("public_data", PROJECT_ID, "exchange_rates").document("USD_TWD")
         doc_ref.set({
-            "rates": rate_history_dict,
+            "rates": price_data["USD_TWD"],
             "lastUpdated": datetime.now().isoformat()
         })
         print("成功儲存 USD/TWD 匯率資料。")
 
     return price_data
 
-def find_price_for_date(history, target_date):
+def find_price_for_date(history, target_date_str):
     """在歷史資料中尋找特定日期的價格（若無則往前找）"""
+    target_date = datetime.strptime(target_date_str, '%Y-%m-%d').date()
     for i in range(7): # 最多回溯7天
-        d = target_date - timedelta(days=i)
-        if d in history:
-            return history[d]
+        d_str = (target_date - timedelta(days=i)).strftime('%Y-%m-%d')
+        if d_str in history:
+            return history[d_str]
     return None
 
 def calculate_and_save_portfolio_history(uid, transactions, market_data):
@@ -114,8 +114,7 @@ def calculate_and_save_portfolio_history(uid, transactions, market_data):
     first_date = datetime.strptime(transactions[0]['date'], '%Y-%m-%d').date()
     today = datetime.now().date()
     
-    rate_history_raw = market_data.get("USD_TWD", {})
-    rate_history = {k.date(): v for k, v in rate_history_raw.items()}
+    rate_history = market_data.get("USD_TWD", {})
 
     d = first_date
     while d <= today:
@@ -136,13 +135,12 @@ def calculate_and_save_portfolio_history(uid, transactions, market_data):
             elif t['type'] == 'sell':
                 daily_holdings[symbol]['quantity'] -= quantity
 
-        rate_on_date = find_price_for_date(rate_history, d) or 1
+        rate_on_date = find_price_for_date(rate_history, date_str) or 1
 
         for symbol, h_data in daily_holdings.items():
             if h_data['quantity'] > 1e-9:
-                price_history_raw = market_data.get(symbol, {})
-                price_history = {k.date(): v for k, v in price_history_raw.items()}
-                price_on_date = find_price_for_date(price_history, d)
+                price_history = market_data.get(symbol, {})
+                price_on_date = find_price_for_date(price_history, date_str)
 
                 if price_on_date is not None:
                     rate = rate_on_date if h_data['currency'] == 'USD' else 1
@@ -153,8 +151,8 @@ def calculate_and_save_portfolio_history(uid, transactions, market_data):
         
         d += timedelta(days=1)
 
-    # **關鍵修改：使用新的、正確的資料庫路徑**
-    doc_ref = db.collection(f"artifacts/{PROJECT_ID}/users/{uid}/user_data").document("portfolio_history")
+    # **健檢修正：使用正確的、拆段的資料庫路徑**
+    doc_ref = db.collection("artifacts", PROJECT_ID, "users", uid, "user_data").document("portfolio_history")
     doc_ref.set({"history": portfolio_history})
     print(f"成功儲存使用者 {uid} 的資產歷史。")
 
