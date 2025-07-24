@@ -1,13 +1,12 @@
-# main.py
 import os
 import yfinance as yf
 import firebase_admin
 from firebase_admin import credentials, firestore
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ==============================================================================
-# 1. 請將您前端使用的 firebaseConfig 物件內容，完整貼到此處
+# 1. 請確認您前端使用的 firebaseConfig 物件內容，貼在此處
 # ==============================================================================
 FIREBASE_CONFIG = {
     "apiKey": "AIzaSyAlymQXtutAG8UY48-TehVU70jD9RmCiBE",
@@ -30,12 +29,15 @@ except ValueError:
     print("Firebase App already initialized.")
 
 db = firestore.client()
-app_id = FIREBASE_CONFIG.get("appId", "default-app-id")
+# **關鍵修改：使用 projectId 作為路徑，而不是 appId**
+PROJECT_ID = FIREBASE_CONFIG.get("projectId")
+if not PROJECT_ID:
+    raise ValueError("projectId not found in firebaseConfig")
 
 def get_all_symbols():
     """從所有使用者的交易紀錄中讀取不重複的股票代碼"""
     symbols = set()
-    users_ref = db.collection(f"artifacts/{app_id}/users")
+    users_ref = db.collection(f"artifacts/{PROJECT_ID}/users")
     for user_doc in users_ref.stream():
         transactions_ref = user_doc.reference.collection("transactions")
         for trans_doc in transactions_ref.stream():
@@ -63,7 +65,8 @@ def fetch_and_save_stock_data(symbol):
             # 使用 'Close' 價格，因為 yfinance 的 adjClose 在近期可能為空
             price_history[date_str] = row['Close']
 
-        doc_ref = db.collection(f"artifacts/{app_id}/public/price_history").document(symbol)
+        # **關鍵修改：使用新的、正確的資料庫路徑**
+        doc_ref = db.collection(f"public_data/{PROJECT_ID}/price_history").document(symbol)
         doc_ref.set({
             "prices": price_history,
             "lastUpdated": datetime.now().isoformat()
@@ -89,7 +92,8 @@ def fetch_and_save_exchange_rates():
             date_str = index.strftime('%Y-%m-%d')
             rate_history[date_str] = row['Close']
 
-        doc_ref = db.collection(f"artifacts/{app_id}/public/exchange_rates").document("USD_TWD")
+        # **關鍵修改：使用新的、正確的資料庫路徑**
+        doc_ref = db.collection(f"public_data/{PROJECT_ID}/exchange_rates").document("USD_TWD")
         doc_ref.set({
             "rates": rate_history,
             "lastUpdated": datetime.now().isoformat()
@@ -100,10 +104,8 @@ def fetch_and_save_exchange_rates():
 
 
 if __name__ == "__main__":
-    # 1. 更新匯率
     fetch_and_save_exchange_rates()
     
-    # 2. 更新所有股票價格
     all_symbols = get_all_symbols()
     if all_symbols:
         for symbol in all_symbols:
