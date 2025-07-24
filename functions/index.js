@@ -7,7 +7,7 @@ admin.initializeApp();
 const db = admin.firestore();
 
 // 當交易紀錄有任何變動時，觸發此函式
-exports.recalculateHoldings = functions.firestore
+exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540 }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
         const { userId } = context.params;
