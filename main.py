@@ -70,7 +70,7 @@ def fetch_and_update_market_data(symbols):
     for symbol in all_symbols:
         is_forex = symbol == "TWD=X"
         collection_name = "exchange_rates" if is_forex else "price_history"
-        doc_ref = db.collection("public_data", collection_name).document(symbol)
+        doc_ref = db.collection(collection_name).document(symbol)
         
         start_date = None
         try:
@@ -117,7 +117,7 @@ def get_market_data_from_db(symbols):
         collection_name = "exchange_rates" if is_forex else "price_history"
         field_name = "rates" if is_forex else "prices"
         
-        doc_ref = db.collection("public_data", collection_name).document(symbol)
+        doc_ref = db.collection(collection_name).document(symbol)
         doc = doc_ref.get()
         if doc.exists:
             market_data[symbol] = doc.to_dict().get(field_name, {})
