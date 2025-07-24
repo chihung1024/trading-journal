@@ -15,14 +15,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
       - name: Deploy to Firebase
-        uses: w9jds/firebase-action@master
+        uses: firebase-actions/github-action@v0
         with:
           args: deploy --only functions
         env:
           # 從 GitHub Secrets 讀取服務帳號，進行安全認證
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
-          # 或是使用服務帳號金鑰
-          GCP_SA_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           # 指定您的 Firebase 專案 ID
           PROJECT_ID: trading-journal-4922c
