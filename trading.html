@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>股票交易紀錄與資產分析系統 (最終版)</title>
+    <title>股票交易紀錄與資產分析系統 (優化版)</title>
     <!-- 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- 引入 ApexCharts 圖表庫 -->
@@ -33,7 +33,7 @@
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
                 <div class="flex items-center space-x-3">
                     <i data-lucide="line-chart" class="text-indigo-600 h-8 w-8"></i>
-                    <h1 class="text-2xl font-bold text-gray-800">交易紀錄與資產分析 (雲端版)</h1>
+                    <h1 class="text-2xl font-bold text-gray-800">交易紀錄與資產分析 (雲端優化版)</h1>
                 </div>
                 <div id="auth-status-display" class="text-xs text-gray-500 text-right">
                     <span id="auth-status">連線中...</span>
@@ -48,7 +48,7 @@
             <div id="loading-overlay" class="fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-40">
                 <div class="flex flex-col items-center text-center p-4">
                     <svg id="loading-spinner-icon" class="animate-spin h-10 w-10 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                    <p id="loading-text" class="mt-4 text-lg font-medium text-gray-700">正在連線至雲端...</p>
+                    <p id="loading-text" class="mt-4 text-lg font-medium text-gray-700">正在從雲端同步資料...</p>
                 </div>
             </div>
 
@@ -76,7 +76,7 @@
         </main>
 
         <!-- Modals -->
-        <div id="transaction-modal" class="fixed inset-0 z-30 overflow-y-auto hidden"><div class="flex items-center justify-center min-h-screen"><div class="fixed inset-0 modal-backdrop" id="modal-backdrop-trans"></div><div class="bg-white rounded-lg shadow-xl p-8 z-40 w-full max-w-md mx-4"><h3 id="modal-title" class="text-2xl font-bold mb-6 text-gray-800">新增交易紀錄</h3><form id="transaction-form"><input type="hidden" id="transaction-id"><div class="mb-4"><label for="transaction-date" class="block text-sm font-medium text-gray-700 mb-1">日期</label><input type="date" id="transaction-date" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label for="stock-symbol" class="block text-sm font-medium text-gray-700 mb-1">股票代碼</label><input type="text" id="stock-symbol" placeholder="例如: AAPL, 2330.TW" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label class="block text-sm font-medium text-gray-700 mb-1">交易類型</label><div class="flex space-x-4"><label class="flex items-center"><input type="radio" name="transaction-type" value="buy" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500" checked><span class="ml-2 text-gray-700">買入</span></label><label class="flex items-center"><input type="radio" name="transaction-type" value="sell" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="ml-2 text-gray-700">賣出</span></label><label class="flex items-center"><input type="radio" name="transaction-type" value="dividend" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="ml-2 text-gray-700">股息</span></label></div></div><div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4"><div><label for="quantity" class="block text-sm font-medium text-gray-700 mb-1">股數</label><input type="number" id="quantity" step="any" placeholder="100" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div><label for="price" class="block text-sm font-medium text-gray-700 mb-1">價格 / 每股股息</label><input type="number" id="price" step="any" placeholder="150.5" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div></div><div class="mb-4"><label for="currency" class="block text-sm font-medium text-gray-700 mb-1">幣別</label><select id="currency" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"><option value="USD" selected>USD (美元)</option><option value="TWD">TWD (台幣)</option></select></div><div class="flex justify-end space-x-4 mt-8"><button type="button" id="cancel-btn" class="btn bg-gray-200 text-gray-700 font-bold py-2 px-4 rounded-lg hover:bg-gray-300">取消</button><button type="submit" class="btn bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700">儲存</button></div></form></div></div></div>
+        <div id="transaction-modal" class="fixed inset-0 z-30 overflow-y-auto hidden"><div class="flex items-center justify-center min-h-screen"><div class="fixed inset-0 modal-backdrop" id="modal-backdrop-trans"></div><div class="bg-white rounded-lg shadow-xl p-8 z-40 w-full max-w-md mx-4"><h3 id="modal-title" class="text-2xl font-bold mb-6 text-gray-800">新增交易紀錄</h3><form id="transaction-form"><input type="hidden" id="transaction-id"><div class="mb-4"><label for="transaction-date" class="block text-sm font-medium text-gray-700 mb-1">日期</label><input type="date" id="transaction-date" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label for="stock-symbol" class="block text-sm font-medium text-gray-700 mb-1">股票代碼</label><input type="text" id="stock-symbol" placeholder="例如: AAPL, 2330.TW" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label class="block text-sm font-medium text-gray-700 mb-1">交易類型</label><div class="flex space-x-4"><label class="flex items-center"><input type="radio" name="transaction-type" value="buy" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500" checked><span class="ml-2 text-gray-700">買入</span></label><label class="flex items-center"><input type="radio" name="transaction-type" value="sell" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="ml-2 text-gray-700">賣出</span></label><label class="flex items-center"><input type="radio" name="transaction-type" value="dividend" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="ml-2 text-gray-700">股息</span></label></div></div><div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4"><div><label for="quantity" class="block text-sm font-medium text-gray-700 mb-1">股數</label><input type="number" id="quantity" step="any" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div><label for="price" class="block text-sm font-medium text-gray-700 mb-1">價格 (原幣)</label><input type="number" id="price" step="any" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div></div><div class="mb-6"><label for="currency" class="block text-sm font-medium text-gray-700 mb-1">幣別</label><select id="currency" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"><option value="USD">USD</option><option value="TWD">TWD</option></select></div><div class="flex justify-end space-x-4"><button type="button" id="cancel-btn" class="btn bg-gray-200 text-gray-700 font-bold py-2 px-4 rounded-lg hover:bg-gray-300">取消</button><button type="submit" class="btn bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700">儲存</button></div></form></div></div></div>
         <div id="confirm-modal" class="fixed inset-0 z-50 overflow-y-auto hidden"><div class="flex items-center justify-center min-h-screen"><div class="fixed inset-0 modal-backdrop"></div><div class="bg-white rounded-lg shadow-xl p-8 z-50 w-full max-w-sm mx-4"><h3 id="confirm-title" class="text-lg font-semibold mb-4 text-gray-800">確認操作</h3><p id="confirm-message" class="text-gray-600 mb-6">您確定要執行此操作嗎？</p><div class="flex justify-end space-x-4"><button id="confirm-cancel-btn" class="btn bg-gray-200 text-gray-700 font-bold py-2 px-4 rounded-lg hover:bg-gray-300">取消</button><button id="confirm-ok-btn" class="btn bg-red-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-red-700">確定</button></div></div></div></div>
     </div>
 
@@ -106,11 +106,14 @@
         let chart;
         let userId;
         let projectId;
+        
         let transactionsUnsubscribe = null;
         let historyUnsubscribe = null;
+        let holdingsUnsubscribe = null;
         let confirmCallback = null;
-        const priceCache = new Map();
+
         const exchangeRateCache = new Map();
+        let dataLoaded = { transactions: false, holdings: false };
 
         // --- 主程式入口 ---
         document.addEventListener('DOMContentLoaded', () => {
@@ -145,7 +148,7 @@
                     userId = user.uid;
                     document.getElementById('auth-status').textContent = '已連線';
                     document.getElementById('user-id').textContent = `使用者ID: ${userId}`;
-                    await loadInitialData();
+                    setupDataListeners();
                 } else {
                     document.getElementById('auth-status').textContent = '嘗試自動登入...';
                     try {
@@ -173,29 +176,47 @@
         }
 
         // --- 資料處理 (Firestore) ---
-        async function loadInitialData() {
+        function setupDataListeners() {
+            // 清理舊的監聽器
             if (transactionsUnsubscribe) transactionsUnsubscribe();
             if (historyUnsubscribe) historyUnsubscribe();
+            if (holdingsUnsubscribe) holdingsUnsubscribe();
 
+            // 監聽交易紀錄
             const transactionsCol = collection(db, 'artifacts', projectId, 'users', userId, 'transactions');
             const q = query(transactionsCol, orderBy("date", "asc"));
-            transactionsUnsubscribe = onSnapshot(q, async (querySnapshot) => {
-                transactions = querySnapshot.docs.map(doc => {
+            transactionsUnsubscribe = onSnapshot(q, async (snapshot) => {
+                transactions = snapshot.docs.map(doc => {
                     const data = doc.data();
+                    // 確保日期格式正確
                     if (data.date && typeof data.date.toDate === 'function') {
                         data.date = data.date.toDate().toISOString().split('T')[0];
-                    } else if (typeof data.date === 'string') {
-                        data.date = new Date(data.date).toISOString().split('T')[0];
                     }
                     return { id: doc.id, ...data };
                 });
-                await processData();
-                document.getElementById('loading-overlay').style.display = 'none';
+                dataLoaded.transactions = true;
+                await renderAll();
             }, (error) => {
                 console.error("讀取交易紀錄失敗:", error);
-                showLoadingError("讀取資料失敗！", "請檢查您的網路連線與 Firebase 安全規則。");
+                showLoadingError("讀取交易紀錄失敗！", "請檢查您的網路連線與 Firestore 安全規則。");
             });
             
+            // 監聽後端算好的持股資料
+            const holdingsDocRef = doc(db, 'artifacts', projectId, 'users', userId, 'user_data', 'current_holdings');
+            holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    holdings = docSnap.data().holdings || {};
+                } else {
+                    holdings = {}; // 如果文件不存在，清空持股
+                }
+                dataLoaded.holdings = true;
+                renderAll();
+            }, (error) => {
+                console.error("讀取持股資料失敗:", error);
+                showNotification('error', '讀取持股資料失敗，請確認後端腳本是否已執行。');
+            });
+
+            // 監聽後端算好的資產歷史
             const historyDocRef = doc(db, 'artifacts', projectId, 'users', userId, 'user_data', 'portfolio_history');
             historyUnsubscribe = onSnapshot(historyDocRef, (docSnap) => {
                 if (docSnap.exists()) {
@@ -204,86 +225,54 @@
                 }
             }, (error) => {
                  console.error("讀取資產歷史失敗:", error);
-                 showNotification('error', '讀取資產圖表資料失敗，請確認安全規則是否正確。');
+                 showNotification('error', '讀取資產圖表資料失敗。');
             });
         }
 
-        async function processData() {
-            showNotification('info', '正在從雲端讀取市場資料...');
-            await updateAllCaches();
-            await calculateHoldings();
+        async function renderAll() {
+            // 確保兩份核心資料都已載入至少一次
+            if (!dataLoaded.transactions || !dataLoaded.holdings) {
+                return;
+            }
+            
+            // 渲染前，先確保交易紀錄表格所需的匯率已快取
+            await updateExchangeRateCache();
+
             renderHoldingsTable();
-            await renderTransactionsTable();
-            await updateDashboard();
-            // 圖表更新由自己的監聽器 (historyUnsubscribe) 處理
-            showNotification('success', '資料更新完成！');
+            renderTransactionsTable();
+            updateDashboard();
+
+            // 首次載入完成後隱藏轉圈動畫
+            const loadingOverlay = document.getElementById('loading-overlay');
+            if (loadingOverlay.style.display !== 'none') {
+                loadingOverlay.style.display = 'none';
+                showNotification('success', '雲端資料同步完成！');
+            }
         }
         
-        // --- 核心計算與渲染 ---
-        async function calculateHoldings() {
-            holdings = {};
-            let realizedPL = 0;
-            for(const t of transactions) {
-                const symbol = t.symbol.toUpperCase();
-                if (!holdings[symbol]) {
-                    holdings[symbol] = { symbol: symbol, quantity: 0, totalCostTWD: 0, avgCostTWD: 0, currentPrice: 0, marketValueTWD: 0, unrealizedPLTWD: 0, returnRate: 0, realizedPLTWD: 0, currency: t.currency };
-                }
-                const h = holdings[symbol];
-                const quantity = parseFloat(t.quantity);
-                const price = parseFloat(t.price);
-                const rate = t.currency === 'USD' ? (exchangeRateCache.get(t.date) || 1) : 1;
-                if (t.type === 'buy') {
-                    h.totalCostTWD += quantity * price * rate;
-                    h.quantity += quantity;
-                    h.avgCostTWD = h.quantity > 0 ? h.totalCostTWD / h.quantity : 0;
-                } else if (t.type === 'sell') {
-                    const costOfSoldShares = h.avgCostTWD * quantity;
-                    h.realizedPLTWD += (quantity * price * rate) - costOfSoldShares;
-                    h.totalCostTWD -= costOfSoldShares;
-                    h.quantity -= quantity;
-                    if (h.quantity < 1e-9) { h.quantity = 0; h.totalCostTWD = 0; h.avgCostTWD = 0; }
-                } else if (t.type === 'dividend') {
-                    h.realizedPLTWD += quantity * price * rate;
-                }
-            };
-            
-            const latestRate = exchangeRateCache.get(new Date().toISOString().split('T')[0]) || 1;
-            Object.keys(holdings).forEach(symbol => {
-                if (holdings[symbol].quantity === 0) {
-                    realizedPL += holdings[symbol].realizedPLTWD;
-                    delete holdings[symbol];
-                } else {
-                    const h = holdings[symbol];
-                    const priceHistory = priceCache.get(symbol) || {};
-                    h.currentPrice = findLatestPrice(priceHistory);
-                    const rate = h.currency === 'USD' ? latestRate : 1;
-                    h.marketValueTWD = h.quantity * h.currentPrice * rate;
-                    h.unrealizedPLTWD = h.marketValueTWD - h.totalCostTWD;
-                    h.returnRate = h.totalCostTWD > 0 ? (h.unrealizedPLTWD / h.totalCostTWD) * 100 : 0;
-                }
-            });
-            document.getElementById('realized-pl').textContent = formatCurrency(Object.values(holdings).reduce((acc, h) => acc + h.realizedPLTWD, realizedPL));
-        }
-
+        // --- 核心渲染 (不再計算，只負責呈現) ---
         function renderHoldingsTable() {
             const tableBody = document.getElementById('holdings-table-body');
             tableBody.innerHTML = '';
-            if (Object.keys(holdings).length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有持股紀錄。</td></tr>`;
+            const holdingsArray = Object.values(holdings);
+
+            if (holdingsArray.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有持股紀錄，請新增一筆交易。</td></tr>`;
                 return;
             }
-            Object.values(holdings).sort((a,b) => b.marketValueTWD - a.marketValueTWD).forEach(h => {
+
+            holdingsArray.sort((a,b) => b.marketValueTWD - a.marketValueTWD).forEach(h => {
                 const row = document.createElement('tr');
                 row.className = "hover:bg-gray-50";
                 row.innerHTML = `
                     <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${h.symbol}</td>
-                    <td class="px-6 py-4 whitespace-nowrap">${h.quantity.toFixed(2)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${(h.quantity || 0).toFixed(2)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.avgCostTWD)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.totalCostTWD)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.currentPrice)} <span class="text-xs text-gray-500">${h.currency}</span></td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.marketValueTWD)}</td>
                     <td class="px-6 py-4 whitespace-nowrap font-semibold ${h.unrealizedPLTWD >= 0 ? 'text-red-600' : 'text-green-600'}">${formatCurrency(h.unrealizedPLTWD)}</td>
-                    <td class="px-6 py-4 whitespace-nowrap font-semibold ${h.returnRate >= 0 ? 'text-red-600' : 'text-green-600'}">${h.returnRate.toFixed(2)}%</td>
+                    <td class="px-6 py-4 whitespace-nowrap font-semibold ${h.returnRate >= 0 ? 'text-red-600' : 'text-green-600'}">${(h.returnRate || 0).toFixed(2)}%</td>
                 `;
                 tableBody.appendChild(row);
             });
@@ -296,6 +285,7 @@
                 tableBody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-gray-500">沒有交易紀錄。</td></tr>`;
                 return;
             }
+
             for (const t of [...transactions].reverse()) {
                 const row = document.createElement('tr');
                 row.className = "hover:bg-gray-50";
@@ -312,35 +302,30 @@
             document.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', handleDelete));
         }
 
-        async function updateDashboard() {
-            const totalMarketValue = Object.values(holdings).reduce((sum, h) => sum + h.marketValueTWD, 0);
-            const totalUnrealizedPL = Object.values(holdings).reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
-            const totalRealizedPL = parseFloat(document.getElementById('realized-pl').textContent.replace(/,/g, '')) || 0;
-            
-            let totalInvestedTWD = 0;
-            let totalWithdrawnTWD = 0;
+        function updateDashboard() {
+            const holdingsArray = Object.values(holdings);
+            const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
+            const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
+            const totalRealizedPL = holdingsArray.reduce((sum, h) => sum + h.realizedPLTWD, 0);
+            const totalCost = holdingsArray.reduce((sum, h) => sum + h.totalCostTWD, 0);
 
-            for(const t of transactions) {
-                const rate = t.currency === 'USD' ? (exchangeRateCache.get(t.date) || 1) : 1;
-                const amountTWD = t.quantity * t.price * rate;
-                if (t.type === 'buy') {
-                    totalInvestedTWD += amountTWD;
-                } else {
-                    totalWithdrawnTWD += amountTWD;
-                }
-            }
-
-            const totalPL = (totalMarketValue + totalWithdrawnTWD) - totalInvestedTWD;
-            const totalReturnOnInvestment = totalInvestedTWD > 0 ? (totalPL / totalInvestedTWD) * 100 : 0;
+            const totalReturnOnInvestment = totalCost > 0 ? ((totalUnrealizedPL + totalRealizedPL) / totalCost) * 100 : 0;
             
             document.getElementById('total-assets').textContent = formatCurrency(totalMarketValue);
+            
             const unrealizedEl = document.getElementById('unrealized-pl');
             unrealizedEl.textContent = formatCurrency(totalUnrealizedPL);
             unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
-            document.getElementById('total-return').textContent = `${totalReturnOnInvestment.toFixed(2)}%`;
-            document.getElementById('total-return').className = `text-3xl font-bold mt-2 ${totalReturnOnInvestment >= 0 ? 'text-red-600' : 'text-green-600'}`;
-            document.getElementById('realized-pl').className = `text-3xl font-bold mt-2 ${totalRealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
+            
+            const realizedEl = document.getElementById('realized-pl');
+            realizedEl.textContent = formatCurrency(totalRealizedPL);
+            realizedEl.className = `text-3xl font-bold mt-2 ${totalRealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
 
+            const totalReturnEl = document.getElementById('total-return');
+            totalReturnEl.textContent = `${totalReturnOnInvestment.toFixed(2)}%`;
+            totalReturnEl.className = `text-3xl font-bold mt-2 ${totalReturnOnInvestment >= 0 ? 'text-red-600' : 'text-green-600'}`;
+
+            // XIRR 計算仍需原始交易數據
             const cashflows = [];
             for(const t of transactions) {
                 const rate = t.currency === 'USD' ? (exchangeRateCache.get(t.date) || 1) : 1;
@@ -372,54 +357,24 @@
             chart.updateSeries([{ data: chartData }]);
         }
 
-        // --- API & 價格快取 ---
-        async function getPriceHistory(symbol) {
-            if (priceCache.has(symbol)) return priceCache.get(symbol);
-            const docRef = doc(db, 'public_data', projectId, 'price_history', symbol);
-            try {
-                const docSnap = await getDoc(docRef);
-                if (docSnap.exists()) { const data = docSnap.data().prices; priceCache.set(symbol, data); return data; }
-            } catch (e) {
-                console.error(`從 Firestore 讀取 ${symbol} 股價失敗:`, e);
-            }
-            return {};
-        }
-        
-        async function getExchangeRate(dateStr) {
-            const date = dateStr.split('T')[0];
-            if (exchangeRateCache.has(date)) return exchangeRateCache.get(date);
+        // --- API & 價格快取 (簡化版) ---
+        async function updateExchangeRateCache() {
+            const uniqueDates = [...new Set(transactions.map(t => t.date))];
+            const rateDocRef = doc(db, 'public_data', projectId, 'exchange_rates', 'USD_TWD');
             
-            const docRef = doc(db, 'public_data', projectId, 'exchange_rates', 'USD_TWD');
             try {
-                const docSnap = await getDoc(docRef);
+                const docSnap = await getDoc(rateDocRef);
                 if (docSnap.exists()) {
                     const rates = docSnap.data().rates;
-                    const rate = findPriceForDate(rates, date);
-                    if (rate > 0) {
-                        exchangeRateCache.set(date, rate);
-                        return rate;
+                    for (const date of uniqueDates) {
+                        if (!exchangeRateCache.has(date)) {
+                            exchangeRateCache.set(date, findPriceForDate(rates, date) || 1);
+                        }
                     }
                 }
             } catch (e) {
                 console.error(`從 Firestore 讀取匯率失敗:`, e);
             }
-            return 32; // Fallback
-        }
-
-        async function updateAllCaches() {
-            const uniqueSymbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
-            for (const symbol of uniqueSymbols) { await getPriceHistory(symbol); }
-            
-            const uniqueDates = new Set();
-            transactions.forEach(t => uniqueDates.add(t.date));
-            if (transactions.length > 0) {
-                const firstDate = new Date(transactions[0].date);
-                const today = new Date();
-                for (let d = new Date(firstDate); d <= today; d.setDate(d.getDate() + 1)) {
-                    uniqueDates.add(d.toISOString().split('T')[0]);
-                }
-            }
-            for (const date of uniqueDates) { await getExchangeRate(date); }
         }
 
         // --- Modal & 表單處理 ---
@@ -427,7 +382,7 @@
             e.preventDefault();
             const id = document.getElementById('transaction-id').value;
             const transactionData = { 
-                date: new Date(document.getElementById('transaction-date').value), // **健檢修正：儲存為 Date 物件**
+                date: new Date(document.getElementById('transaction-date').value),
                 symbol: document.getElementById('stock-symbol').value.toUpperCase().trim(), 
                 type: document.querySelector('input[name="transaction-type"]:checked').value, 
                 quantity: parseFloat(document.getElementById('quantity').value), 
@@ -446,7 +401,7 @@
                 }
                 closeModal();
                 showNotification('success', id ? '交易已更新！' : '交易已新增！');
-                showNotification('info', `後端腳本將在下次排程時自動更新 ${transactionData.symbol} 的歷史股價。`);
+                showNotification('info', `後端腳本將在下次排程時自動更新您的資產數據。`);
 
             } catch (error) {
                 console.error("儲存交易失敗:", error);
@@ -504,8 +459,19 @@
             loadingText.innerHTML = `<p class="text-red-600 font-bold text-xl">${title}</p><p class="mt-2 text-gray-600">${message}</p>${linkHtml}`;
         }
         function switchTab(tabName) { document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden')); document.getElementById(`${tabName}-tab`).classList.remove('hidden'); document.querySelectorAll('.tab-item').forEach(el => { el.classList.remove('border-indigo-500', 'text-indigo-600'); el.classList.add('border-transparent', 'text-gray-500'); }); const activeTab = document.querySelector(`[data-tab="${tabName}"]`); activeTab.classList.add('border-indigo-500', 'text-indigo-600'); activeTab.classList.remove('border-transparent', 'text-gray-500'); }
-        function findPriceForDate(history, targetDateStr) { if (history[targetDateStr]) { return history[targetDateStr]; } let tempDate = new Date(targetDateStr); for (let i = 0; i < 7; i++) { tempDate.setDate(tempDate.getDate() - 1); const prevDateStr = tempDate.toISOString().split('T')[0]; if (history[prevDateStr]) { return history[prevDateStr]; } } return 0; }
-        function findLatestPrice(history) { const sortedDates = Object.keys(history).sort((a, b) => new Date(b) - new Date(a)); return sortedDates.length > 0 ? history[sortedDates[0]] : 0; }
+        function findPriceForDate(history, targetDateStr) {
+            if (!history || !targetDateStr) return 0;
+            const originalTargetDate = new Date(targetDateStr);
+            for (let i = 0; i < 7; i++) {
+                const target = new Date(originalTargetDate);
+                target.setDate(target.getDate() - i);
+                const d_str = target.toISOString().split('T')[0];
+                if (history[d_str]) {
+                    return history[d_str];
+                }
+            }
+            return 0;
+        }
         function calculateXIRR(cashflows, guess = 0.1) { if (cashflows.length <= 1) return 0; const maxIterations = 100; const tolerance = 1.0e-7; let x0 = guess; for (let i = 0; i < maxIterations; i++) { let fValue = 0; let fDerivative = 0; const firstDate = cashflows[0].date; for (const cf of cashflows) { const days = (cf.date - firstDate) / (1000 * 60 * 60 * 24); fValue += cf.amount * Math.pow(1 + x0, -days / 365.0); fDerivative += (-days / 365.0) * cf.amount * Math.pow(1 + x0, (-days / 365.0) - 1); } if (Math.abs(fDerivative) < 1e-9) return NaN; const x1 = x0 - fValue / fDerivative; if (Math.abs(x1 - x0) <= tolerance) return x1; x0 = x1; } return NaN; }
     </script>
 </body>
