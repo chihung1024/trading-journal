@@ -56,7 +56,7 @@ async function getMarketDataFromDb(transactions) {
         const collectionName = isForex ? "exchange_rates" : "price_history";
         const fieldName = isForex ? "rates" : "prices";
         
-        const docRef = db.doc(`public_data/${collectionName}/${symbol}`);
+        const docRef = db.collection(collectionName).doc(symbol);
         const doc = await docRef.get();
         if (doc.exists) {
             marketData[symbol] = doc.data()[fieldName] || {};
