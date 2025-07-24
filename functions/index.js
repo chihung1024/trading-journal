@@ -87,32 +87,53 @@ async function fetchAndSaveMarketData(symbol) {
     try {
         const isForex = symbol === "TWD=X";
         const collectionName = isForex ? "exchange_rates" : "price_history";
-        const fieldName = isForex ? "rates" : "prices";
 
-        const queryOptions = { period1: '2000-01-01' }; // 從 2000 年開始抓
-        const result = await yahooFinance.historical(symbol, queryOptions);
+        if (isForex) {
+            // 處理匯率
+            const queryOptions = { period1: '2000-01-01' };
+            const result = await yahooFinance.historical(symbol, queryOptions);
+            if (!result || result.length === 0) return null;
 
-        if (!result || result.length === 0) {
-            console.warn(`Could not fetch historical data for ${symbol} from Yahoo Finance.`);
-            return null;
+            const newMarketData = {};
+            for (const item of result) {
+                newMarketData[item.date.toISOString().split('T')[0]] = item.close;
+            }
+            await db.collection(collectionName).doc(symbol).set({ rates: newMarketData, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
+            console.log(`Successfully fetched and saved ${Object.keys(newMarketData).length} data points for ${symbol}.`);
+            return { prices: newMarketData, splits: {} }; // 回傳統一格式
+        } else {
+            // 處理股票 (股價 + 分割)
+            const queryOptions = { period1: '2000-01-01', events: 'split' };
+            const [priceHistory, splitHistory] = await Promise.all([
+                yahooFinance.historical(symbol, { period1: '2000-01-01' }),
+                yahooFinance.historical(symbol, queryOptions).then(r => r.splits)
+            ]);
+
+            const prices = {};
+            if (priceHistory) {
+                for (const item of priceHistory) {
+                    prices[item.date.toISOString().split('T')[0]] = item.close;
+                }
+            }
+
+            const splits = {};
+            if (splitHistory) {
+                for (const item of splitHistory) {
+                    splits[item.date.toISOString().split('T')[0]] = item.numerator / item.denominator;
+                }
+            }
+
+            const payload = {
+                prices: prices,
+                splits: splits,
+                lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+                dataSource: 'yahoo-finance2-live',
+            };
+
+            await db.collection(collectionName).doc(symbol).set(payload);
+            console.log(`Successfully fetched and saved data for ${symbol}: ${Object.keys(prices).length} prices, ${Object.keys(splits).length} splits.`);
+            return { prices, splits };
         }
-
-        const newMarketData = {};
-        for (const item of result) {
-            const dateStr = item.date.toISOString().split('T')[0];
-            newMarketData[dateStr] = item.close;
-        }
-
-        const docRef = db.collection(collectionName).doc(symbol);
-        const payload = {
-            [fieldName]: newMarketData,
-            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            dataSource: 'yahoo-finance2-live',
-        };
-
-        await docRef.set(payload);
-        console.log(`Successfully fetched and saved ${Object.keys(newMarketData).length} data points for ${symbol}.`);
-        return newMarketData;
 
     } catch (error) {
         console.error(`Error fetching or saving market data for ${symbol}:`, error);
@@ -123,65 +144,84 @@ async function fetchAndSaveMarketData(symbol) {
 function calculateCurrentHoldings(transactions, marketData) {
     const holdings = {};
     let totalRealizedPL = 0;
-    const rateHistory = marketData["TWD=X"] || {};
+    const rateHistory = marketData["TWD=X"]?.prices || {};
     const latestRate = findPriceForDate(rateHistory, new Date()) || 1;
 
-    // 將交易按日期排序，確保計算順序正確
-    transactions.sort((a, b) => (a.date.toDate ? a.date.toDate() : new Date(a.date)) - (b.date.toDate ? b.date.toDate() : new Date(b.date)));
+    const allSymbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
-    for (const t of transactions) {
-        const symbol = t.symbol.toUpperCase();
-        if (!holdings[symbol]) {
+    for (const symbol of allSymbols) {
+        const symbolTransactions = transactions.filter(t => t.symbol.toUpperCase() === symbol);
+        const priceHistory = marketData[symbol]?.prices || {};
+        const splitHistory = marketData[symbol]?.splits || {};
+
+        // 1. 創建一個包含所有事件（交易和分割）的合併列表
+        const events = [];
+        for (const t of symbolTransactions) {
+            events.push({ ...t, type: t.type, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' });
+        }
+        for (const dateStr in splitHistory) {
+            events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' });
+        }
+
+        // 2. 按日期對所有事件進行排序
+        events.sort((a, b) => a.date - b.date);
+
+        // 3. 迭代事件，模擬持股變化
+        let quantity = 0;
+        let totalCostTWD = 0;
+        let realizedPLTWD = 0;
+
+        for (const event of events) {
+            if (event.eventType === 'transaction') {
+                const t = event;
+                const transactionDate = t.date;
+                const t_quantity = t.quantity || 0;
+                const t_price = t.price || 0;
+                const rate = findPriceForDate(rateHistory, transactionDate) || 1;
+                const costRate = t.currency === 'USD' ? rate : 1;
+
+                if (t.type === 'buy') {
+                    totalCostTWD += t_quantity * t_price * costRate;
+                    quantity += t_quantity;
+                } else if (t.type === 'sell') {
+                    const avgCost = quantity > 0 ? totalCostTWD / quantity : 0;
+                    const costOfSoldShares = avgCost * t_quantity;
+                    realizedPLTWD += (t_quantity * t_price * costRate) - costOfSoldShares;
+                    totalCostTWD -= costOfSoldShares;
+                    quantity -= t_quantity;
+                } else if (t.type === 'dividend') {
+                    realizedPLTWD += t_quantity * t_price * costRate;
+                }
+            } else if (event.eventType === 'split') {
+                console.log(`Applying split of ${event.splitRatio} for ${symbol} on ${event.date}`);
+                quantity *= event.splitRatio;
+            }
+        }
+
+        // 4. 計算最終持股數據
+        if (quantity > 1e-9) {
+            const currentPrice = findPriceForDate(priceHistory, new Date());
+            const marketRate = symbolTransactions[0].currency === 'USD' ? latestRate : 1;
+            const marketValueTWD = quantity * currentPrice * marketRate;
+            
             holdings[symbol] = {
                 symbol: symbol,
-                quantity: 0,
-                totalCostTWD: 0,
-                avgCostTWD: 0,
-                currency: t.currency || 'TWD',
-                realizedPLTWD: 0
+                quantity: quantity,
+                totalCostTWD: totalCostTWD,
+                avgCostTWD: quantity > 0 ? totalCostTWD / quantity : 0,
+                currency: symbolTransactions[0].currency || 'TWD',
+                realizedPLTWD: realizedPLTWD,
+                currentPrice: currentPrice || 0,
+                marketValueTWD: marketValueTWD,
+                unrealizedPLTWD: marketValueTWD - totalCostTWD,
+                returnRate: totalCostTWD > 0 ? ((marketValueTWD - totalCostTWD) / totalCostTWD) * 100 : 0,
             };
-        }
-
-        const h = holdings[symbol];
-        const quantity = t.quantity || 0;
-        const price = t.price || 0;
-        const transactionDate = t.date.toDate ? t.date.toDate() : new Date(t.date);
-        const rate = findPriceForDate(rateHistory, transactionDate) || 1;
-        const costRate = t.currency === 'USD' ? rate : 1;
-
-        if (t.type === 'buy') {
-            h.totalCostTWD += quantity * price * costRate;
-            h.quantity += quantity;
-        } else if (t.type === 'sell') {
-            const avgCost = h.quantity > 0 ? h.totalCostTWD / h.quantity : 0;
-            const costOfSoldShares = avgCost * quantity;
-            h.realizedPLTWD += (quantity * price * costRate) - costOfSoldShares;
-            h.totalCostTWD -= costOfSoldShares;
-            h.quantity -= quantity;
-        } else if (t.type === 'dividend') {
-            h.realizedPLTWD += quantity * price * costRate;
-        }
-    }
-
-    const finalHoldings = {};
-    for (const symbol in holdings) {
-        const h = holdings[symbol];
-        if (h.quantity > 1e-9) {
-            const priceHistory = marketData[symbol] || {};
-            const currentPrice = findPriceForDate(priceHistory, new Date());
-            h.avgCostTWD = h.quantity > 0 ? h.totalCostTWD / h.quantity : 0;
-            h.currentPrice = currentPrice || 0;
-            const marketRate = h.currency === 'USD' ? latestRate : 1;
-            h.marketValueTWD = h.quantity * h.currentPrice * marketRate;
-            h.unrealizedPLTWD = h.marketValueTWD - h.totalCostTWD;
-            h.returnRate = h.totalCostTWD > 0 ? (h.unrealizedPLTWD / h.totalCostTWD) * 100 : 0;
-            finalHoldings[symbol] = h;
         } else {
-            totalRealizedPL += h.realizedPLTWD;
+            totalRealizedPL += realizedPLTWD;
         }
     }
 
-    return { holdings: finalHoldings, realizedPL: totalRealizedPL };
+    return { holdings: holdings, realizedPL: totalRealizedPL };
 }
 
 function findPriceForDate(history, targetDate) {
