@@ -13,10 +13,24 @@ exports.recalculateHoldings = functions.firestore
 
         console.log(`Recalculating holdings for user: ${userId}`);
 
+        const holdingsDocRef = db.doc(`artifacts/${projectId}/users/${userId}/user_data/current_holdings`);
+        const historyDocRef = db.doc(`artifacts/${projectId}/users/${userId}/user_data/portfolio_history`);
+
         // 1. 獲取該使用者的所有交易紀錄
         const transactionsRef = db.collection(`artifacts/${projectId}/users/${userId}/transactions`);
-        const snapshot = await transactionsRef.orderBy("date", "asc").get();
+        const snapshot = await transactionsRef.get();
         const transactions = snapshot.docs.map(doc => doc.data());
+
+        // **新增：如果沒有交易紀錄，則清空所有資料**
+        if (transactions.length === 0) {
+            console.log(`No transactions found for user ${userId}. Clearing all data.`);
+            // 使用 Promise.all 來同時執行刪除/清空操作
+            await Promise.all([
+                holdingsDocRef.set({ holdings: {}, realizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+            ]);
+            return null; // 結束函式
+        }
 
         // 2. 獲取市場資料 (股價和匯率)
         const marketData = await getMarketDataFromDb(projectId, transactions);
@@ -25,11 +39,9 @@ exports.recalculateHoldings = functions.firestore
         const { holdings, realizedPL } = calculateCurrentHoldings(transactions, marketData);
 
         // 4. 將計算結果存回 Firestore
-        const holdingsDocRef = db.doc(`artifacts/${projectId}/users/${userId}/user_data/current_holdings`);
-        
         return holdingsDocRef.set({
             holdings: holdings,
-            realizedPL: realizedPL, // 也可以順便儲存已實現損益
+            realizedPL: realizedPL,
             lastUpdated: admin.firestore.FieldValue.serverTimestamp()
         });
     });
@@ -58,6 +70,9 @@ function calculateCurrentHoldings(transactions, marketData) {
     let totalRealizedPL = 0;
     const rateHistory = marketData["TWD=X"] || {};
     const latestRate = findPriceForDate(rateHistory, new Date()) || 1;
+
+    // 將交易按日期排序，確保計算順序正確
+    transactions.sort((a, b) => (a.date.toDate ? a.date.toDate() : new Date(a.date)) - (b.date.toDate ? b.date.toDate() : new Date(b.date)));
 
     for (const t of transactions) {
         const symbol = t.symbol.toUpperCase();
