@@ -1,0 +1,28 @@
+name: Deploy to Firebase Functions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'functions/**'
+  workflow_dispatch: # 允許手動觸發
+
+jobs:
+  deploy-functions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Deploy to Firebase
+        uses: w9jds/firebase-action@master
+        with:
+          args: deploy --only functions
+        env:
+          # 從 GitHub Secrets 讀取服務帳號，進行安全認證
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          # 或是使用服務帳號金鑰
+          GCP_SA_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # 指定您的 Firebase 專案 ID
+          PROJECT_ID: trading-journal-4922c
