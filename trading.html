@@ -68,7 +68,7 @@
                     <button id="add-transaction-btn" class="btn bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700 flex items-center space-x-2 w-full sm:w-auto justify-center"><i data-lucide="plus-circle" class="h-5 w-5"></i><span>新增交易</span></button>
                 </div>
                 <div id="holdings-tab" class="tab-content overflow-x-auto"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">股數</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">平均成本(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">總成本(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">現價</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">市值(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">未實現損益(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">報酬率</th></tr></thead><tbody id="holdings-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
-                <div id="transactions-tab" class="tab-content overflow-x-auto hidden"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">日期</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">類型</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">股數</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">價格(原幣)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">總金額</th><th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th></tr></thead><tbody id="transactions-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
+                <div id="transactions-tab" class="tab-content overflow-x-auto hidden"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">日期</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">類型</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">股數</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">價格(原幣)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">總金額(TWD)</th><th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th></tr></thead><tbody id="transactions-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
             </div>
 
             <!-- Asset Growth Chart -->
@@ -296,11 +296,22 @@
                 const typeText = { buy: '買入', sell: '賣出', dividend: '股息' };
                 const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' };
                 
-                const totalAmount = parseFloat(t.quantity) * parseFloat(t.price);
-                const totalAmountHTML = `${formatCurrency(totalAmount, 0)} <span class="text-xs text-gray-500">${t.currency}</span>`;
+                let totalAmountTWD_HTML;
+                if (t.currency === 'USD') {
+                    const rate = exchangeRateCache.get(t.date);
+                    if (rate) {
+                        const totalAmountTWD = parseFloat(t.quantity) * parseFloat(t.price) * rate;
+                        totalAmountTWD_HTML = formatCurrency(totalAmountTWD, 0);
+                    } else {
+                        totalAmountTWD_HTML = `<span class="text-xs text-orange-600 font-semibold">匯率資料不足</span>`;
+                    }
+                } else {
+                    const totalAmountTWD = parseFloat(t.quantity) * parseFloat(t.price);
+                    totalAmountTWD_HTML = formatCurrency(totalAmountTWD, 0);
+                }
 
                 row.innerHTML = `
-                    <td class="px-6 py-4 whitespace-nowrap">${t.date}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td><td class="px-6 py-4 whitespace-nowrap">${parseFloat(t.quantity).toLocaleString()}</td><td class="px-6 py-4 whitespace-nowrap">${formatCurrency(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${totalAmountHTML}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${t.date}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td><td class="px-6 py-4 whitespace-nowrap">${parseFloat(t.quantity).toLocaleString()}</td><td class="px-6 py-4 whitespace-nowrap">${formatCurrency(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${totalAmountTWD_HTML}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${t.id}" class="edit-btn text-indigo-600 hover:text-indigo-900 mr-3">編輯</button><button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900">刪除</button></td>`;
                 tableBody.appendChild(row);
             };
