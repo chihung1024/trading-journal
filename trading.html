@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>股票交易紀錄與資產分析系統</title>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- ApexCharts -->
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+  <!-- Lucide Icons -->
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.378.0/dist/umd/lucide.min.js"></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+
+  <style>
+    body {font-family:'Inter','Noto Sans TC',sans-serif;background:#f0f2f5}
+    .card {background:#fff;border-radius:.75rem;box-shadow:0 4px 6px -1px rgb(0 0 0/.1),0 2px 4px -2px rgb(0 0 0/.1);transition:.3s}
+    .card:hover {transform:translateY(-2px);box-shadow:0 10px 15px -3px rgb(0 0 0/.1),0 4px 6px -4px rgb(0 0 0/.1)}
+    .btn {transition:.2s}
+    .btn:hover {transform:scale(1.05)}
+    .modal-backdrop {background:rgba(0,0,0,.5);transition:opacity .3s}
+  </style>
+</head>
+<body class="text-gray-800">
+  <!-- =====  介面（統計卡、圖表、表格、Modal）與上一版相同，為節省篇幅略  ===== -->
+  <!-- =====  ...完整 HTML 結構請保留，僅腳本處作修改                 ===== -->
+
+  <script type="module">
+    /* ----------  Firebase SDK v10  ---------- */
+    import {initializeApp, getApps, getApp} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import {getAuth, signInAnonymously, onAuthStateChanged} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import {
+      getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
+      query, orderBy, onSnapshot, getDoc
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    /* ===== 把下列換成你自己的 firebaseConfig ===== */
+    const firebaseConfig = {
+      apiKey: "AIzaSyAlymQXtutAG8UY48-TehVU70jD9RmCiBE",
+      authDomain: "trading-journal-4922c.firebaseapp.com",
+      projectId: "trading-journal-4922c",
+      storageBucket: "trading-journal-4922c.appspot.com",
+      messagingSenderId: "50863752247",
+      appId: "1:50863752247:web:766eaa892d2c8d28bb6bb2"
+    };
+    /* ======================================== */
+
+    /* ---------- 全域變數 ---------- */
+    let db, auth, userId, projectId = firebaseConfig.projectId;
+    let transactions = [], holdings = {}, chart, txUnsub = null, histUnsub = null;
+    const priceCache = new Map(), rateCache = new Map();
+    let confirmCb = null;
+
+    /* ---------- 啟動 ---------- */
+    document.addEventListener('DOMContentLoaded', init);
+
+    async function init () {
+      const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+      auth = getAuth(app);
+      db   = getFirestore(app);
+
+      initChart();
+      lucide.createIcons();
+      bindUI();
+      onAuthStateChanged(auth, async u=>{
+        if(u){ userId=u.uid; document.getElementById('auth-status').textContent='已連線';
+               document.getElementById('user-id').textContent=`使用者ID: ${userId}`;
+               await subscribeData(); }
+        else  signInAnonymously(auth);
+      });
+    }
+
+    /* ---------- 監聽 Firestore ---------- */
+    async function subscribeData(){
+      if(txUnsub)  txUnsub();
+      if(histUnsub)histUnsub();
+
+      const txCol = collection(db,'artifacts',projectId,'users',userId,'transactions');
+      txUnsub = onSnapshot(query(txCol,orderBy('date','asc')), async snap=>{
+        transactions = snap.docs.map(d=>{
+          const data=d.data();
+          data.date   = (data.date.toDate?.()||data.date).toISOString().slice(0,10);
+          return {id:d.id,...data};
+        });
+        await refreshAll();
+        document.getElementById('loading-overlay').style.display='none';
+      });
+
+      const histDoc = doc(db,'artifacts',projectId,'users',userId,'user_data','portfolio_history');
+      histUnsub = onSnapshot(histDoc,ds=>{
+        if(ds.exists()) updateAssetChart(ds.data().history);
+      });
+    }
+
+    /* ---------- CRUD ---------- */
+    async function saveTx(e){
+      e.preventDefault();
+      const id = e.target['transaction-id'].value;
+      const data = {
+        date : new Date(e.target['transaction-date'].value),
+        symbol: e.target['stock-symbol'].value.toUpperCase().trim(),
+        type  : e.target['transaction-type'].value,
+        quantity:+e.target.quantity.value,
+        price : +e.target.price.value,
+        currency:e.target.currency.value
+      };
+      const txCol = collection(db,'artifacts',projectId,'users',userId,'transactions');
+      try{
+        id? await updateDoc(doc(txCol,id),data) : await addDoc(txCol,data);
+        closeModal(); notify('success',id?'交易已更新!':'交易已新增!');
+      }catch(err){console.error(err);notify('error','儲存失敗');}
+    }
+    async function delTx(id){
+      const txCol=collection(db,'artifacts',projectId,'users',userId,'transactions');
+      await deleteDoc(doc(txCol,id));
+    }
+
+    /* ---------- 資料處理（略，與上一版相同，保持 segmented 路徑） ---------- */
+    /* ---------- UI 工具 ---------- */
+    function bindUI(){
+      document.getElementById('transaction-form').addEventListener('submit',saveTx);
+      /* 其他按鈕監聽同前... */
+    }
+    function notify(type,msg){
+      const area=document.getElementById('notification-area'),
+            n=document.createElement('div');
+      n.className=`flex items-center ${type==='success'?'bg-green-500':type==='info'?'bg-blue-500':'bg-red-500'} text-white text-sm font-bold px-4 py-3 rounded-md shadow-lg mb-2`;
+      n.innerHTML=`<i data-lucide="${type==='success'?'check-circle':type==='info'?'info':'alert-circle'}" class="w-5 h-5 mr-2"></i><p>${msg}</p>`;
+      area.appendChild(n); lucide.replace({root:n});
+      setTimeout(()=>{n.style.opacity='0';setTimeout(()=>n.remove(),500)},5000);
+    }
+    /* ---------- 其餘：calcHoldings / dashboard / chart 與上一版相同 ---------- */
+  </script>
+</body>
+</html>
