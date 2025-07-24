@@ -169,6 +169,7 @@ function calculateCurrentHoldings(transactions, marketData) {
         // 3. 迭代事件，模擬持股變化
         let quantity = 0;
         let totalCostTWD = 0;
+        let totalCostOriginal = 0; // 新增：用於計算原幣總成本
         let realizedPLTWD = 0;
 
         for (const event of events) {
@@ -181,14 +182,19 @@ function calculateCurrentHoldings(transactions, marketData) {
                 const costRate = t.currency === 'USD' ? rate : 1;
 
                 if (t.type === 'buy') {
-                    totalCostTWD += t_quantity * t_price * costRate;
+                    totalCostOriginal += t_quantity * t_price; // 計算原幣成本
+                    totalCostTWD += t_quantity * t_price * costRate; // 計算台幣成本
                     quantity += t_quantity;
                 } else if (t.type === 'sell') {
-                    const avgCost = quantity > 0 ? totalCostTWD / quantity : 0;
-                    const costOfSoldShares = avgCost * t_quantity;
-                    realizedPLTWD += (t_quantity * t_price * costRate) - costOfSoldShares;
-                    totalCostTWD -= costOfSoldShares;
+                    const avgCostOriginal = quantity > 0 ? totalCostOriginal / quantity : 0;
+                    const avgCostTWD = quantity > 0 ? totalCostTWD / quantity : 0;
+                    
+                    totalCostOriginal -= avgCostOriginal * t_quantity;
+                    totalCostTWD -= avgCostTWD * t_quantity;
+                    
+                    realizedPLTWD += (t_quantity * t_price * costRate) - (avgCostTWD * t_quantity);
                     quantity -= t_quantity;
+
                 } else if (t.type === 'dividend') {
                     realizedPLTWD += t_quantity * t_price * costRate;
                 }
@@ -208,13 +214,13 @@ function calculateCurrentHoldings(transactions, marketData) {
             holdings[symbol] = {
                 symbol: symbol,
                 quantity: quantity,
-                totalCostTWD: totalCostTWD,
-                avgCostTWD: quantity > 0 ? totalCostTWD / quantity : 0,
+                totalCostTWD: totalCostTWD, // 台幣總成本
+                avgCost: quantity > 0 ? totalCostOriginal / quantity : 0, // 原幣平均成本
                 currency: currency,
                 realizedPLTWD: realizedPLTWD,
-                currentPrice: currentPrice || 0,
-                marketValueTWD: marketValueTWD,
-                unrealizedPLTWD: marketValueTWD - totalCostTWD,
+                currentPrice: currentPrice || 0, // 現價 (原幣)
+                marketValueTWD: marketValueTWD, // 市值 (TWD)
+                unrealizedPLTWD: marketValueTWD - totalCostTWD, // 未實現損益 (TWD)
                 returnRate: totalCostTWD > 0 ? ((marketValueTWD - totalCostTWD) / totalCostTWD) * 100 : 0,
             };
         } else {
