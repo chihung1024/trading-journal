@@ -64,7 +64,7 @@ async function getMarketData(transactions) {
     for (const symbol of allSymbols) {
         const collectionName = (symbol === "TWD=X") ? "exchange_rates" : "price_history";
         const doc = await db.collection(collectionName).doc(symbol).get();
-        marketData[symbol] = doc.exists() ? doc.data() : {};
+        marketData[symbol] = doc.exists ? doc.data() : {}; // CORRECTED LINE
     }
     return marketData;
 }
