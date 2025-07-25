@@ -138,7 +138,7 @@ function getAdjustmentFactor(transactionDate, splitHistory) {
     return factor;
 }
 
-// Main calculation logic based on the transaction adjustment model.
+// Main calculation logic based on the Average Cost Method.
 function calculateHoldings(transactions, marketData) {
     const holdings = {};
     let totalRealizedPL = 0;
@@ -152,107 +152,96 @@ function calculateHoldings(transactions, marketData) {
         const dividendHistory = marketData[symbol]?.dividends || {};
         const currency = symbolTransactions[0]?.currency || 'TWD';
 
-        // 1. Adjust all transactions first
+        // 1. Adjust all transactions for splits.
         const adjustedTransactions = symbolTransactions.map(t => {
             const factor = getAdjustmentFactor(t.date, splitHistory);
+            const isCashDividend = t.transactionType === 'dividend';
             return {
                 ...t,
-                adjustedQuantity: t.quantity * factor,
-                adjustedPrice: t.price / factor,
+                adjustedQuantity: isCashDividend ? t.quantity : t.quantity * factor,
+                adjustedPrice: isCashDividend ? 0 : t.price / factor,
             };
         });
 
-        // 2. Calculate current holdings and cost basis from adjusted transactions
-        let currentAdjustedShares = 0;
-        let totalCostTWD = 0;
-        let realizedPLFromSales = 0;
+        // 2. Calculate total buys to determine average cost in both original currency and TWD.
+        let totalAdjustedSharesBought = 0;
+        let totalBuyCostOriginal = 0;
+        let totalBuyCostTWD = 0;
 
-        const buys = adjustedTransactions.filter(t => t.transactionType === 'buy').sort((a, b) => a.date - b.date);
-        const sells = adjustedTransactions.filter(t => t.transactionType === 'sell').sort((a, b) => a.date - b.date);
-
-        let costOfGoodsSold = 0;
-        let sharesSold = 0;
-        let buyIndex = 0;
-
-        for (const sell of sells) {
-            const rate = findNearestValue(exchangeRates, sell.date) || 1;
-            const proceeds = sell.adjustedQuantity * sell.adjustedPrice * (currency === 'USD' ? rate : 1);
-            let sharesToCover = sell.adjustedQuantity;
-            
-            while (sharesToCover > 0 && buyIndex < buys.length) {
-                const buy = buys[buyIndex];
-                const buyRate = findNearestValue(exchangeRates, buy.date) || 1;
-                const costPerShare = buy.adjustedPrice * (currency === 'USD' ? buyRate : 1);
-
-                const sharesFromThisBuy = Math.min(sharesToCover, buy.adjustedQuantity - (sharesSold[buyIndex] || 0));
-                costOfGoodsSold += sharesFromThisBuy * costPerShare;
-                
-                sharesSold[buyIndex] = (sharesSold[buyIndex] || 0) + sharesFromThisBuy;
-                sharesToCover -= sharesFromThisBuy;
-
-                if (sharesSold[buyIndex] >= buy.adjustedQuantity) {
-                    buyIndex++;
-                }
-            }
-            realizedPLFromSales += proceeds - costOfGoodsSold;
-            costOfGoodsSold = 0; // Reset for next sale
-        }
-
-        buys.forEach(buy => {
+        adjustedTransactions.filter(t => t.transactionType === 'buy').forEach(buy => {
             const rate = findNearestValue(exchangeRates, buy.date) || 1;
-            currentAdjustedShares += buy.adjustedQuantity;
-            totalCostTWD += buy.adjustedQuantity * buy.adjustedPrice * (currency === 'USD' ? rate : 1);
+            totalAdjustedSharesBought += buy.adjustedQuantity;
+            totalBuyCostOriginal += buy.adjustedQuantity * buy.adjustedPrice;
+            totalBuyCostTWD += buy.adjustedQuantity * buy.adjustedPrice * (currency === 'USD' ? rate : 1);
         });
 
-        sells.forEach(sell => {
-            currentAdjustedShares -= sell.adjustedQuantity;
+        const avgCostPerAdjustedShareOriginal = totalAdjustedSharesBought > 0 ? totalBuyCostOriginal / totalAdjustedSharesBought : 0;
+        const avgCostPerAdjustedShareTWD = totalAdjustedSharesBought > 0 ? totalBuyCostTWD / totalAdjustedSharesBought : 0;
+
+        // 3. Calculate realized P/L from sales using the TWD average cost.
+        let realizedPLFromSales = 0;
+        let totalAdjustedSharesSold = 0;
+        adjustedTransactions.filter(t => t.transactionType === 'sell').forEach(sell => {
+            const rate = findNearestValue(exchangeRates, sell.date) || 1;
+            const proceedsTWD = sell.adjustedQuantity * sell.adjustedPrice * (currency === 'USD' ? rate : 1);
+            const costOfSaleTWD = sell.adjustedQuantity * avgCostPerAdjustedShareTWD;
+            realizedPLFromSales += proceedsTWD - costOfSaleTWD;
+            totalAdjustedSharesSold += sell.adjustedQuantity;
         });
 
-        // 3. Calculate dividend income
-        let dividendIncome = 0;
-        const manualDividends = adjustedTransactions.filter(t => t.transactionType === 'dividend');
-        manualDividends.forEach(div => {
+        // 4. Calculate dividend income.
+        let dividendIncomeTWD = 0;
+        // Manual dividend entries (quantity is the total amount)
+        adjustedTransactions.filter(t => t.transactionType === 'dividend').forEach(div => {
             const rate = findNearestValue(exchangeRates, div.date) || 1;
-            dividendIncome += div.quantity * (currency === 'USD' ? rate : 1); // quantity is total amount for manual dividends
+            dividendIncomeTWD += div.adjustedQuantity * (currency === 'USD' ? rate : 1);
         });
 
+        // Fetched dividend history
         const sortedDividendDates = Object.keys(dividendHistory).sort();
         for (const divDateStr of sortedDividendDates) {
             const divDate = new Date(divDateStr);
             const dividendPerShare = dividendHistory[divDateStr];
             
             let sharesOnDivDate = 0;
-            adjustedTransactions.filter(t => t.date < divDate).forEach(t => {
+            const dayBeforeDiv = new Date(divDate);
+            dayBeforeDiv.setDate(dayBeforeDiv.getDate() - 1);
+
+            adjustedTransactions.filter(t => t.date <= dayBeforeDiv && t.transactionType !== 'dividend').forEach(t => {
                 if (t.transactionType === 'buy') sharesOnDivDate += t.adjustedQuantity;
                 if (t.transactionType === 'sell') sharesOnDivDate -= t.adjustedQuantity;
             });
 
             if (sharesOnDivDate > 0) {
                 const rate = findNearestValue(exchangeRates, divDate) || 1;
-                dividendIncome += sharesOnDivDate * dividendPerShare * (currency === 'USD' ? rate : 1);
+                dividendIncomeTWD += sharesOnDivDate * dividendPerShare * (currency === 'USD' ? rate : 1);
             }
         }
 
-        const totalRealizedPLTWD = realizedPLFromSales + dividendIncome;
+        const totalRealizedPLTWD = realizedPLFromSales + dividendIncomeTWD;
 
-        // 4. Final calculation for current holdings
+        // 5. Calculate final current holdings.
+        const currentAdjustedShares = totalAdjustedSharesBought - totalAdjustedSharesSold;
+
         if (currentAdjustedShares > 1e-9) {
+            const currentCostBasisTWD = currentAdjustedShares * avgCostPerAdjustedShareTWD;
             const latestPrice = findNearestValue(priceHistory, new Date());
             const latestRate = findNearestValue(exchangeRates, new Date()) || 1;
-            const marketValueTWD = latestPrice ? currentAdjustedShares * latestPrice * (currency === 'USD' ? latestRate : 1) : 0;
-            const unrealizedPLTWD = marketValueTWD - totalCostTWD;
+            
+            const marketValueTWD = latestPrice !== null ? currentAdjustedShares * latestPrice * (currency === 'USD' ? latestRate : 1) : 0;
+            const unrealizedPLTWD = marketValueTWD - currentCostBasisTWD;
 
             holdings[symbol] = {
                 symbol,
                 quantity: currentAdjustedShares,
-                avgCost: totalCostTWD / currentAdjustedShares,
-                totalCostTWD,
+                avgCost: avgCostPerAdjustedShareOriginal,
+                totalCostTWD: currentCostBasisTWD,
                 currency,
                 currentPrice: latestPrice,
                 marketValueTWD,
                 unrealizedPLTWD,
                 realizedPLTWD: totalRealizedPLTWD,
-                returnRate: totalCostTWD > 0 ? (unrealizedPLTWD / totalCostTWD) * 100 : 0,
+                returnRate: currentCostBasisTWD > 0 ? (unrealizedPLTWD / currentCostBasisTWD) * 100 : 0,
             };
         } else {
             totalRealizedPL += totalRealizedPLTWD;
