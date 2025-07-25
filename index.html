@@ -604,6 +604,33 @@
             }
             return NaN;
         }
+
+        // Helper function to format currency
+        function formatCurrency(value, decimals = 2) {
+            const num = Number(value);
+            if (isNaN(num)) return '0.00';
+            return num.toLocaleString('en-US', {
+                minimumFractionDigits: decimals,
+                maximumFractionDigits: decimals
+            });
+        }
+
+        function findNearestValue(history, date) {
+            if (!history) return null;
+            const targetDate = new Date(date);
+            targetDate.setUTCHours(0, 0, 0, 0);
+
+            for (let i = 0; i < 7; i++) {
+                const d = new Date(targetDate);
+                d.setDate(d.getDate() - i);
+                const dateStr = d.toISOString().split('T')[0];
+                if (history[dateStr] !== undefined) {
+                    return history[dateStr];
+                }
+            }
+            return null;
+        }
+
     </script>
 </body>
 </html>
