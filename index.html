@@ -91,6 +91,7 @@
             appId: "1:50863752247:web:766eaa892d2c8d28bb6bb2"
         };
 
+        // --- Global Variables ---
         let db, auth;
         let transactions = [];
         let holdings = {};
@@ -106,10 +107,107 @@
         const exchangeRateCache = new Map();
         let dataLoaded = { transactions: false, holdings: false };
 
+        // --- Helper Functions ---
+        function formatCurrency(value, decimals = 2) {
+            const num = Number(value);
+            if (isNaN(num)) return '0.00';
+            return num.toLocaleString('en-US', {
+                minimumFractionDigits: decimals,
+                maximumFractionDigits: decimals
+            });
+        }
+
+        function findNearestValue(history, date) {
+            if (!history) return null;
+            const targetDate = new Date(date);
+            targetDate.setUTCHours(0, 0, 0, 0);
+
+            for (let i = 0; i < 7; i++) {
+                const d = new Date(targetDate);
+                d.setDate(d.getDate() - i);
+                const dateStr = d.toISOString().split('T')[0];
+                if (history[dateStr] !== undefined) {
+                    return history[dateStr];
+                }
+            }
+            return null;
+        }
+
+        function showNotification(type, message) {
+            const area = document.getElementById('notification-area');
+            const color = type === 'success' ? 'bg-green-500' : (type === 'info' ? 'bg-blue-500' : 'bg-red-500');
+            const icon = type === 'success' ? 'check-circle' : (type === 'info' ? 'info' : 'alert-circle');
+            const notification = document.createElement('div');
+            notification.className = `flex items-center ${color} text-white text-sm font-bold px-4 py-3 rounded-md shadow-lg mb-2`;
+            notification.innerHTML = `<i data-lucide="${icon}" class="w-5 h-5 mr-2"></i><p>${message}</p>`;
+            area.appendChild(notification);
+            lucide.createIcons({ nodes: [notification.querySelector('i')] });
+            setTimeout(() => {
+                notification.style.transition = 'opacity 0.5s ease';
+                notification.style.opacity = '0';
+                setTimeout(() => notification.remove(), 500);
+            }, 5000);
+        }
+
+        function showConfirm(message, callback) {
+            document.getElementById('confirm-message').textContent = message;
+            confirmCallback = callback;
+            document.getElementById('confirm-modal').classList.remove('hidden');
+        }
+
+        function hideConfirm() {
+            confirmCallback = null;
+            document.getElementById('confirm-modal').classList.add('hidden');
+        }
+
+        function showLoadingError(title, message, link = null) {
+            const loadingSpinner = document.getElementById('loading-spinner-icon');
+            if (loadingSpinner) loadingSpinner.style.display = 'none';
+            const loadingText = document.getElementById('loading-text');
+            let linkHtml = link ? `<a href="${link}" target="_blank" class="text-blue-500 hover:underline">Learn more</a>` : '';
+            loadingText.innerHTML = `<p class="text-red-600 font-bold text-xl">${title}</p><p class="mt-2 text-gray-600">${message}</p>${linkHtml}`;
+        }
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.getElementById(`${tabName}-tab`).classList.remove('hidden');
+            document.querySelectorAll('.tab-item').forEach(el => {
+                el.classList.remove('border-indigo-500', 'text-indigo-600');
+                el.classList.add('border-transparent', 'text-gray-500');
+            });
+            const activeTab = document.querySelector(`[data-tab="${tabName}"]`);
+            activeTab.classList.add('border-indigo-500', 'text-indigo-600');
+            activeTab.classList.remove('border-transparent', 'text-gray-500');
+        }
+
+        function calculateXIRR(cashflows, guess = 0.1) {
+            if (cashflows.length <= 1) return 0;
+            const maxIterations = 100;
+            const tolerance = 1.0e-7;
+            let x0 = guess;
+            for (let i = 0; i < maxIterations; i++) {
+                let fValue = 0;
+                let fDerivative = 0;
+                const firstDate = cashflows[0].date;
+                for (const cf of cashflows) {
+                    const days = (cf.date - firstDate) / (1000 * 60 * 60 * 24);
+                    fValue += cf.amount * Math.pow(1 + x0, -days / 365.0);
+                    fDerivative += (-days / 365.0) * cf.amount * Math.pow(1 + x0, (-days / 365.0) - 1);
+                }
+                if (Math.abs(fDerivative) < 1e-9) return NaN;
+                const x1 = x0 - fValue / fDerivative;
+                if (Math.abs(x1 - x0) <= tolerance) return x1;
+                x0 = x1;
+            }
+            return NaN;
+        }
+
+        // --- Main Entry Point ---
         document.addEventListener('DOMContentLoaded', () => {
             initialize();
         });
 
+        // --- Core Functions ---
         async function initialize() {
             if (!firebaseConfig.projectId) {
                 showLoadingError("設定錯誤！", "您的 firebaseConfig 中缺少 projectId。");
@@ -534,101 +632,6 @@
 
         function closeModal() {
             document.getElementById('transaction-modal').classList.add('hidden');
-        }
-
-        function hideConfirm() {
-            confirmCallback = null;
-            document.getElementById('confirm-modal').classList.add('hidden');
-        }
-
-        function showNotification(type, message) {
-            const area = document.getElementById('notification-area');
-            const color = type === 'success' ? 'bg-green-500' : (type === 'info' ? 'bg-blue-500' : 'bg-red-500');
-            const icon = type === 'success' ? 'check-circle' : (type === 'info' ? 'info' : 'alert-circle');
-            const notification = document.createElement('div');
-            notification.className = `flex items-center ${color} text-white text-sm font-bold px-4 py-3 rounded-md shadow-lg mb-2`;
-            notification.innerHTML = `<i data-lucide="${icon}" class="w-5 h-5 mr-2"></i><p>${message}</p>`;
-            area.appendChild(notification);
-            lucide.createIcons({ nodes: [notification.querySelector('i')] });
-            setTimeout(() => {
-                notification.style.transition = 'opacity 0.5s ease';
-                notification.style.opacity = '0';
-                setTimeout(() => notification.remove(), 500);
-            }, 5000);
-        }
-
-        function showConfirm(message, callback) {
-            document.getElementById('confirm-message').textContent = message;
-            confirmCallback = callback;
-            document.getElementById('confirm-modal').classList.remove('hidden');
-        }
-
-        function showLoadingError(title, message, link = null) {
-            const loadingSpinner = document.getElementById('loading-spinner-icon');
-            if (loadingSpinner) loadingSpinner.style.display = 'none';
-            const loadingText = document.getElementById('loading-text');
-            let linkHtml = link ? `<a href="${link}" target="_blank" class="text-blue-500 hover:underline">Learn more</a>` : '';
-            loadingText.innerHTML = `<p class="text-red-600 font-bold text-xl">${title}</p><p class="mt-2 text-gray-600">${message}</p>${linkHtml}`;
-        }
-
-        function switchTab(tabName) {
-            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-            document.getElementById(`${tabName}-tab`).classList.remove('hidden');
-            document.querySelectorAll('.tab-item').forEach(el => {
-                el.classList.remove('border-indigo-500', 'text-indigo-600');
-                el.classList.add('border-transparent', 'text-gray-500');
-            });
-            const activeTab = document.querySelector(`[data-tab="${tabName}"]`);
-            activeTab.classList.add('border-indigo-500', 'text-indigo-600');
-            activeTab.classList.remove('border-transparent', 'text-gray-500');
-        }
-
-        function calculateXIRR(cashflows, guess = 0.1) {
-            if (cashflows.length <= 1) return 0;
-            const maxIterations = 100;
-            const tolerance = 1.0e-7;
-            let x0 = guess;
-            for (let i = 0; i < maxIterations; i++) {
-                let fValue = 0;
-                let fDerivative = 0;
-                const firstDate = cashflows[0].date;
-                for (const cf of cashflows) {
-                    const days = (cf.date - firstDate) / (1000 * 60 * 60 * 24);
-                    fValue += cf.amount * Math.pow(1 + x0, -days / 365.0);
-                    fDerivative += (-days / 365.0) * cf.amount * Math.pow(1 + x0, (-days / 365.0) - 1);
-                }
-                if (Math.abs(fDerivative) < 1e-9) return NaN;
-                const x1 = x0 - fValue / fDerivative;
-                if (Math.abs(x1 - x0) <= tolerance) return x1;
-                x0 = x1;
-            }
-            return NaN;
-        }
-
-        // Helper function to format currency
-        function formatCurrency(value, decimals = 2) {
-            const num = Number(value);
-            if (isNaN(num)) return '0.00';
-            return num.toLocaleString('en-US', {
-                minimumFractionDigits: decimals,
-                maximumFractionDigits: decimals
-            });
-        }
-
-        function findNearestValue(history, date) {
-            if (!history) return null;
-            const targetDate = new Date(date);
-            targetDate.setUTCHours(0, 0, 0, 0);
-
-            for (let i = 0; i < 7; i++) {
-                const d = new Date(targetDate);
-                d.setDate(d.getDate() - i);
-                const dateStr = d.toISOString().split('T')[0];
-                if (history[dateStr] !== undefined) {
-                    return history[dateStr];
-                }
-            }
-            return null;
         }
 
     </script>
