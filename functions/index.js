@@ -6,42 +6,41 @@ admin.initializeApp();
 
 const db = admin.firestore();
 
+// --- Date & Sorting Helpers (Timezone-Safe) ---
+
 /**
- * A robust helper function to get a YYYY-MM-DD string from a Date object,
- * regardless of the user's or server's timezone.
- * @param {Date} date The date object to convert.
- * @returns {string} The date in YYYY-MM-DD format.
+ * Converts a Date object to a YYYY-MM-DD string in UTC.
+ * @param {Date} date The date object.
+ * @returns {string} The date string in YYYY-MM-DD format.
  */
-function toDateString(date) {
+function toUtcDateString(date) {
     if (!date || !(date instanceof Date)) return '';
-    // Use UTC methods to get the year, month, and day to avoid timezone shifts.
-    const year = date.getUTCFullYear();
-    const month = (date.getUTCMonth() + 1).toString().padStart(2, '0');
-    const day = date.getUTCDate().toString().padStart(2, '0');
-    return `${year}-${month}-${day}`;
+    return date.toISOString().split('T')[0];
 }
 
 /**
- * A corrected sorting function for events.
- * It sorts by the normalized date string first, then by event type.
+ * Creates a Date object from a YYYY-MM-DD string, interpreted as UTC midnight.
+ * @param {string} dateStr The date string.
+ * @returns {Date} The date object.
+ */
+function dateFromUtcString(dateStr) {
+    return new Date(`${dateStr}T00:00:00Z`);
+}
+
+/**
+ * Sorts events by UTC date, ensuring splits are processed before transactions on the same day.
  */
 function sortEvents(a, b) {
-    const dateStrA = toDateString(a.date);
-    const dateStrB = toDateString(b.date);
-
-    if (dateStrA !== dateStrB) {
-        return dateStrA.localeCompare(dateStrB);
-    }
-
-    // Dates are the same, 'split' events must come first.
+    const dateA = toUtcDateString(a.date);
+    const dateB = toUtcDateString(b.date);
+    if (dateA !== dateB) return dateA.localeCompare(dateB);
     if (a.eventType === 'split' && b.eventType !== 'split') return -1;
     if (a.eventType !== 'split' && b.eventType === 'split') return 1;
-    
     return 0;
 }
 
+// --- Main Cloud Function ---
 
-// 當交易紀錄有任何變動時，觸發此函式
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540 }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -76,16 +75,16 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540 }).firesto
         return null;
     });
 
+// --- Data Fetching ---
+
 async function getMarketDataFromDb(transactions) {
     const marketData = {};
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
     const allSymbols = [...symbols, "TWD=X"];
 
     for (const symbol of allSymbols) {
-        const isForex = symbol === "TWD=X";
-        const collectionName = isForex ? "exchange_rates" : "price_history";
-        const docRef = db.collection(collectionName).doc(symbol);
-        const doc = await docRef.get();
+        const collectionName = (symbol === "TWD=X") ? "exchange_rates" : "price_history";
+        const doc = await db.collection(collectionName).doc(symbol).get();
 
         if (doc.exists) {
             marketData[symbol] = doc.data();
@@ -100,24 +99,21 @@ async function getMarketDataFromDb(transactions) {
 
 async function fetchAndSaveMarketData(symbol) {
     try {
-        const isForex = symbol === "TWD=X";
-        const collectionName = isForex ? "exchange_rates" : "price_history";
-
-        if (isForex) {
+        if (symbol === "TWD=X") {
             const result = await yahooFinance.historical(symbol, { period1: '2000-01-01' });
             if (!result || result.length === 0) return null;
-            const rates = Object.fromEntries(result.map(item => [toDateString(item.date), item.close]));
-            await db.collection(collectionName).doc(symbol).set({ rates, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
+            const rates = Object.fromEntries(result.map(item => [toUtcDateString(item.date), item.close]));
+            await db.collection("exchange_rates").doc(symbol).set({ rates, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
             return { rates };
         } else {
             const [priceHistory, eventsHistory] = await Promise.all([
                 yahooFinance.historical(symbol, { period1: '2000-01-01' }),
                 yahooFinance.historical(symbol, { period1: '2000-01-01', events: 'split' })
             ]);
-            const prices = priceHistory ? Object.fromEntries(priceHistory.map(item => [toDateString(item.date), item.close])) : {};
-            const splits = eventsHistory?.splits ? Object.fromEntries(eventsHistory.splits.map(item => [toDateString(item.date), item.numerator / item.denominator])) : {};
+            const prices = priceHistory ? Object.fromEntries(priceHistory.map(item => [toUtcDateString(item.date), item.close])) : {};
+            const splits = eventsHistory?.splits ? Object.fromEntries(eventsHistory.splits.map(item => [toUtcDateString(item.date), item.numerator / item.denominator])) : {};
             const payload = { prices, splits, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: 'yahoo-finance2-live' };
-            await db.collection(collectionName).doc(symbol).set(payload);
+            await db.collection("price_history").doc(symbol).set(payload);
             return { prices, splits };
         }
     } catch (error) {
@@ -125,6 +121,8 @@ async function fetchAndSaveMarketData(symbol) {
         return null;
     }
 }
+
+// --- Core Calculation Engines ---
 
 function calculateCurrentHoldings(transactions, marketData) {
     const holdings = {};
@@ -140,7 +138,7 @@ function calculateCurrentHoldings(transactions, marketData) {
 
         const events = [];
         symbolTransactions.forEach(t => events.push({ ...t, date: t.date.toDate(), eventType: 'transaction' }));
-        Object.keys(splitHistory).forEach(dateStr => events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
+        Object.keys(splitHistory).forEach(dateStr => events.push({ date: dateFromUtcString(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
         events.sort(sortEvents);
 
         let currentShares = 0, totalCostOriginal = 0, totalCostTWD = 0, symbolRealizedPLTWD = 0;
@@ -209,7 +207,7 @@ function calculatePortfolioHistory(transactions, marketData) {
         const splitHistory = marketData[symbol]?.splits || {};
         const events = [];
         symbolTransactions.forEach(t => events.push({ ...t, date: t.date.toDate(), eventType: 'transaction' }));
-        Object.keys(splitHistory).forEach(dateStr => events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
+        Object.keys(splitHistory).forEach(dateStr => events.push({ date: dateFromUtcString(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
         events.sort(sortEvents);
         eventsBySymbol[symbol] = events;
     }
@@ -223,8 +221,8 @@ function calculatePortfolioHistory(transactions, marketData) {
             const priceOnDate = findPriceForDate(priceHistory, date);
             if (priceOnDate === null) continue;
 
-            const dateStr = toDateString(date);
-            const relevantEvents = eventsBySymbol[symbol].filter(e => toDateString(e.date) <= dateStr);
+            const dateStr = toUtcDateString(date);
+            const relevantEvents = eventsBySymbol[symbol].filter(e => toUtcDateString(e.date) <= dateStr);
             let sharesOnDate = 0;
 
             for (const event of relevantEvents) {
@@ -244,7 +242,7 @@ function calculatePortfolioHistory(transactions, marketData) {
         }
 
         if (dailyMarketValue > 0) {
-            portfolioHistory[toDateString(date)] = dailyMarketValue;
+            portfolioHistory[toUtcDateString(date)] = dailyMarketValue;
         }
     }
     return portfolioHistory;
@@ -255,16 +253,16 @@ function findPriceForDate(history, targetDate) {
     for (let i = 0; i < 7; i++) {
         const d = new Date(targetDate);
         d.setUTCDate(d.getUTCDate() - i);
-        const d_str = toDateString(d);
+        const d_str = toUtcDateString(d);
         if (history[d_str]) return history[d_str];
     }
-    return null; // Simplified fallback
+    return null;
 }
 
 function getDatesBetween(startDate, endDate) {
     const dates = [];
-    let currentDate = new Date(startDate.toISOString().split('T')[0]); // Normalize start date
-    const finalDate = new Date(endDate.toISOString().split('T')[0]);
+    let currentDate = dateFromUtcString(toUtcDateString(startDate));
+    const finalDate = dateFromUtcString(toUtcDateString(endDate));
     while (currentDate <= finalDate) {
         dates.push(new Date(currentDate));
         currentDate.setUTCDate(currentDate.getUTCDate() + 1);
