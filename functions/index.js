@@ -152,7 +152,23 @@ function calculateCurrentHoldings(transactions, marketData) {
         const events = [];
         symbolTransactions.forEach(t => events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' }));
         Object.keys(splitHistory).forEach(dateStr => events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
-        events.sort((a, b) => a.date - b.date);
+        
+        // 修正後的排序邏輯
+        events.sort((a, b) => {
+            const dateA = a.date.getTime();
+            const dateB = b.date.getTime();
+            if (dateA !== dateB) {
+                return dateA - dateB;
+            }
+            // 日期相同時，'split' 事件優先
+            if (a.eventType === 'split' && b.eventType !== 'split') {
+                return -1;
+            }
+            if (a.eventType !== 'split' && b.eventType === 'split') {
+                return 1;
+            }
+            return 0;
+        });
 
         let currentShares = 0;
         let totalCostOriginal = 0;
@@ -298,7 +314,22 @@ function calculatePortfolioHistory(transactions, marketData) {
         const events = [];
         symbolTransactions.forEach(t => events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' }));
         Object.keys(splitHistory).forEach(dateStr => events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
-        events.sort((a, b) => a.date - b.date);
+        
+        // 修正後的排序邏輯
+        events.sort((a, b) => {
+            const dateA = a.date.getTime();
+            const dateB = b.date.getTime();
+            if (dateA !== dateB) {
+                return dateA - dateB;
+            }
+            if (a.eventType === 'split' && b.eventType !== 'split') {
+                return -1;
+            }
+            if (a.eventType !== 'split' && b.eventType === 'split') {
+                return 1;
+            }
+            return 0;
+        });
         eventsBySymbol[symbol] = events;
     }
 
