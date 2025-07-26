@@ -1,25 +1,35 @@
 import os
 import json
+import sys
 from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, firestore
 from transaction_manager import process_transaction
 
-# Decode the credentials from the environment variable
-cred_json = json.loads(os.environ.get("FIREBASE_ADMIN_CREDENTIALS"))
+# --- Firebase Initialization with Error Handling ---
+firebase_credentials = os.environ.get("FIREBASE_ADMIN_CREDENTIALS")
+if not firebase_credentials:
+    print("Error: FIREBASE_ADMIN_CREDENTIALS environment variable not set.")
+    sys.exit(1)
+
+try:
+    cred_json = json.loads(firebase_credentials)
+except json.JSONDecodeError:
+    print("Error: FIREBASE_ADMIN_CREDENTIALS is not a valid JSON string.")
+    sys.exit(1)
+
 cred = credentials.Certificate(cred_json)
 firebase_admin.initialize_app(cred)
-
 db = firestore.client()
+# -----------------------------------------------------
 
 def initialize_database():
-    # Clear existing data
+    # ... (rest of the function is the same)
     for col in ['stocks', 'transactions', 'rates']:
         docs = db.collection(col).stream()
         for doc in docs:
             doc.reference.delete()
 
-    # Sample transactions
     transactions = [
         {
             'stock_id': 'AAPL',
@@ -33,16 +43,16 @@ def initialize_database():
             'stock_id': 'TSLA',
             'date': (datetime.now() - timedelta(days=800)).strftime('%Y-%m-%d'),
             'type': 'buy',
-            'shares_original': 5, # This was before a 3-for-1 split in Aug 2022
-            'price_original': 900.0, # Price before split
+            'shares_original': 5,
+            'price_original': 900.0,
             'currency_original': 'USD'
         },
         {
             'stock_id': 'GOOGL',
             'date': (datetime.now() - timedelta(days=900)).strftime('%Y-%m-%d'),
             'type': 'buy',
-            'shares_original': 2, # This was before a 20-for-1 split in Jul 2022
-            'price_original': 2200.0, # Price before split
+            'shares_original': 2,
+            'price_original': 2200.0,
             'currency_original': 'USD'
         }
     ]
