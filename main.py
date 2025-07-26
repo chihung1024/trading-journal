@@ -52,8 +52,6 @@ def fetch_and_update_market_data(db, symbols):
         collection_name = "exchange_rates" if is_forex else "price_history"
         doc_ref = db.collection(collection_name).document(symbol)
         
-        # For robustness and to ensure data integrity with splits/dividends,
-        # we fetch the full history each time and overwrite the document.
         start_date = "2000-01-01"
         
         print(f"--- Processing: {symbol} ---")
@@ -62,10 +60,8 @@ def fetch_and_update_market_data(db, symbols):
         try:
             stock = yf.Ticker(symbol)
             
-            # 1. Fetch Price History (Close prices)
             hist = stock.history(start=start_date, interval="1d", auto_adjust=False, back_adjust=False)
             
-            # 2. Fetch Splits and Dividends History
             splits = stock.splits
             dividends = stock.dividends if not is_forex else None
 
@@ -83,7 +79,7 @@ def fetch_and_update_market_data(db, symbols):
                     "dataSource": "yfinance",
                     "description": "Historical daily exchange rates for USD to TWD."
                 }
-            else: # It's a stock
+            else:
                 if splits is not None and not splits.empty:
                     splits_data = {idx.strftime('%Y-%m-%d'): val for idx, val in splits.items()}
                     payload["splits"] = splits_data
@@ -113,8 +109,7 @@ def fetch_and_update_market_data(db, symbols):
 if __name__ == "__main__":
     db_client = initialize_firebase()
     
-    print("
-Starting daily market data update script...")
+    print("Starting daily market data update script...")
     
     symbols_to_update = get_all_symbols_from_transactions(db_client)
 
@@ -123,5 +118,4 @@ Starting daily market data update script...")
     else:
         print("No user transactions found. No market data to update.")
 
-    print("
-Market data update script finished.")
+    print("Market data update script finished.")
