@@ -117,36 +117,40 @@ async function fetchAndSaveMarketData(symbol) {
             return { prices: rates, splits: {} }; 
         } else {
             // 處理股票 (股價 + 分割)
-            const [priceHistory, splitHistory] = await Promise.all([
-                yahooFinance.historical(symbol, { period1: '2000-01-01' }),
-                yahooFinance.historical(symbol, { period1: '2000-01-01', events: 'split' }).then(r => r.splits || [])
-            ]);
+            console.log(`Fetching historical data for ${symbol}...`);
+            const queryOptions = { period1: '2000-01-01', events: 'split' };
+            const results = await yahooFinance.historical(symbol, queryOptions);
 
             const prices = {};
-            if (priceHistory) {
-                for (const item of priceHistory) {
-                    prices[item.date.toISOString().split('T')[0]] = item.close;
+            const splits = {};
+
+            // The `yahoo-finance2` library returns an array with splits mixed in.
+            // We need to iterate and separate them.
+            if (results) {
+                for (const item of results) {
+                    const dateStr = item.date.toISOString().split('T')[0];
+                    prices[dateStr] = item.close;
+                }
+                // The splits are in a separate property of the main result object
+                if (results.splits) {
+                    for (const split of results.splits) {
+                        const dateStr = split.date.toISOString().split('T')[0];
+                        splits[dateStr] = split.numerator / split.denominator;
+                    }
                 }
             }
 
-            const splits = {};
-            if (splitHistory) {
-                for (const item of splitHistory) {
-                    // 確保日期是 YYYY-MM-DD 格式
-                    const dateStr = item.date.toISOString().split('T')[0];
-                    splits[dateStr] = item.numerator / item.denominator;
-                }
-            }
+            console.log(`For ${symbol}, found ${Object.keys(prices).length} price points and ${Object.keys(splits).length} split events.`);
 
             const payload = {
                 prices: prices,
                 splits: splits,
                 lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-                dataSource: 'yahoo-finance2-live',
+                dataSource: 'yahoo-finance2-fixed',
             };
 
             await db.collection(collectionName).doc(symbol).set(payload);
-            console.log(`Successfully fetched and saved data for ${symbol}: ${Object.keys(prices).length} prices, ${Object.keys(splits).length} splits.`);
+            console.log(`Successfully fetched and saved data for ${symbol}.`);
             return { prices, splits };
         }
 
