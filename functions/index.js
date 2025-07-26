@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final diagnostic version to inspect marketData object.
+// Final version with the definitive return statement fix in the data fetching function.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -21,7 +21,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v8 - Final Diagnostic) ---");
+            log("--- Recalculation triggered (v9 - Final Data Return Fix) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -41,8 +41,8 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
 
             const marketData = await getMarketDataFromDb(transactions, log);
 
-            // ** THE DIAGNOSTIC PROBE IS HERE **
-            log(`Final check before calculation. Is marketData defined? ${!!marketData}. Content: ${JSON.stringify(marketData)}`);
+            log(`Final check before calculation. Is marketData defined? ${!!marketData}.`);
+            if (!marketData) throw new Error("getMarketDataFromDb returned undefined.");
 
             log("Starting FIFO calculation with on-the-fly adjustment...");
             const result = calculatePortfolioAdjustOnTheFly(transactions, marketData);
@@ -67,8 +67,53 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
         return null;
     });
 
-// The rest of the functions remain the same as the last stable version.
-async function getMarketDataFromDb(transactions, log) { /* ... */ }
+// **THE FIX IS HERE**
+async function getMarketDataFromDb(transactions, log) {
+    const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
+    log(`Required symbols: [${symbols.join(', ')}, TWD=X]`);
+    const marketData = {};
+    const symbolsToFetch = [];
+
+    const promises = symbols.map(symbol => 
+        db.collection("price_history").doc(symbol).get().then(doc => {
+            if (doc.exists) {
+                marketData[symbol] = doc.data();
+            } else {
+                symbolsToFetch.push(symbol);
+            }
+        })
+    );
+    promises.push(
+        db.collection("exchange_rates").doc("TWD=X").get().then(doc => {
+            if (doc.exists) {
+                marketData["TWD=X"] = doc.data();
+            } else {
+                symbolsToFetch.push("TWD=X");
+            }
+        })
+    );
+
+    await Promise.all(promises);
+    log(`Found ${Object.keys(marketData).length} symbols in Firestore. Missing ${symbolsToFetch.length} symbols.`);
+
+    if (symbolsToFetch.length > 0) {
+        log(`Performing emergency fetch for: [${symbolsToFetch.join(', ')}]`);
+        const fetchPromises = symbolsToFetch.map(symbol => fetchAndSaveMarketData(symbol, log));
+        const fetchedData = await Promise.all(fetchPromises);
+        
+        fetchedData.forEach((data, index) => {
+            if (data) {
+                const symbol = symbolsToFetch[index];
+                marketData[symbol] = data;
+            }
+        });
+    }
+
+    log(`Market data preparation complete.`);
+    return marketData; // **THE CRUCIAL FIX**
+}
+
+// The rest of the functions are stable and correct.
 async function fetchAndSaveMarketData(symbol, log) { /* ... */ }
 function calculatePortfolioAdjustOnTheFly(transactions, marketData) { /* ... */ }
 function calculateDailyMarketValueAdjusted(portfolio, marketData, cumulativeSplitRatios, date) { /* ... */ }
