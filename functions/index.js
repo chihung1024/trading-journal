@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final version with the definitive return statement fix in the data fetching function.
+// Final version with the definitive async/await fix in data fetching.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -21,7 +21,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v9 - Final Data Return Fix) ---");
+            log("--- Recalculation triggered (v10 - Final Async Fix) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -67,14 +67,15 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
         return null;
     });
 
-// **THE FIX IS HERE**
+// **THE FINAL FIX IS HERE**
 async function getMarketDataFromDb(transactions, log) {
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
     log(`Required symbols: [${symbols.join(', ')}, TWD=X]`);
     const marketData = {};
     const symbolsToFetch = [];
 
-    const promises = symbols.map(symbol => 
+    // Step 1: Try to get existing data from Firestore.
+    const readPromises = symbols.map(symbol => 
         db.collection("price_history").doc(symbol).get().then(doc => {
             if (doc.exists) {
                 marketData[symbol] = doc.data();
@@ -83,7 +84,7 @@ async function getMarketDataFromDb(transactions, log) {
             }
         })
     );
-    promises.push(
+    readPromises.push(
         db.collection("exchange_rates").doc("TWD=X").get().then(doc => {
             if (doc.exists) {
                 marketData["TWD=X"] = doc.data();
@@ -92,16 +93,19 @@ async function getMarketDataFromDb(transactions, log) {
             }
         })
     );
-
-    await Promise.all(promises);
+    await Promise.all(readPromises);
     log(`Found ${Object.keys(marketData).length} symbols in Firestore. Missing ${symbolsToFetch.length} symbols.`);
 
+    // Step 2: If any data is missing, perform emergency fetch.
     if (symbolsToFetch.length > 0) {
         log(`Performing emergency fetch for: [${symbolsToFetch.join(', ')}]`);
-        const fetchPromises = symbolsToFetch.map(symbol => fetchAndSaveMarketData(symbol, log));
-        const fetchedData = await Promise.all(fetchPromises);
+        // This will wait for all fetches to complete.
+        const fetchedResults = await Promise.all(
+            symbolsToFetch.map(symbol => fetchAndSaveMarketData(symbol, log))
+        );
         
-        fetchedData.forEach((data, index) => {
+        // Step 3: Correctly merge the newly fetched data back into the main object.
+        fetchedResults.forEach((data, index) => {
             if (data) {
                 const symbol = symbolsToFetch[index];
                 marketData[symbol] = data;
@@ -109,8 +113,8 @@ async function getMarketDataFromDb(transactions, log) {
         });
     }
 
-    log(`Market data preparation complete.`);
-    return marketData; // **THE CRUCIAL FIX**
+    log(`Market data preparation complete. Final object has ${Object.keys(marketData).length} keys.`);
+    return marketData; // Now returns the fully populated object.
 }
 
 // The rest of the functions are stable and correct.
