@@ -1,27 +1,37 @@
 import os
 import json
+import sys
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
 from forex_python.converter import CurrencyRates
 from transaction_manager import get_split_multiplier
 
-# Decode the credentials from the environment variable
-cred_json = json.loads(os.environ.get("FIREBASE_ADMIN_CREDENTIALS"))
+# --- Firebase Initialization with Error Handling ---
+firebase_credentials = os.environ.get("FIREBASE_ADMIN_CREDENTIALS")
+if not firebase_credentials:
+    print("Error: FIREBASE_ADMIN_CREDENTIALS environment variable not set.")
+    sys.exit(1)
+
+try:
+    cred_json = json.loads(firebase_credentials)
+except json.JSONDecodeError:
+    print("Error: FIREBASE_ADMIN_CREDENTIALS is not a valid JSON string.")
+    sys.exit(1)
+
 cred = credentials.Certificate(cred_json)
 firebase_admin.initialize_app(cred)
-
 db = firestore.client()
 c = CurrencyRates()
+# -----------------------------------------------------
 
 def update_data():
     """Update stock prices, exchange rates, and adjust transactions for splits."""
-    # 1. Update exchange rates
+    # ... (rest of the function is the same)
     rates = c.get_rates('USD')
     rates['USD'] = 1.0
     db.collection('rates').document('latest').set(rates)
 
-    # 2. Update stock prices and re-process transactions for splits
     transactions = db.collection('transactions').stream()
     stock_ids = set(t.to_dict()['stock_id'] for t in transactions)
 
