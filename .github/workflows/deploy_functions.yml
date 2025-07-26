@@ -30,7 +30,12 @@ jobs:
       - name: Create Service Account File
         run: echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > ./gcloud-sa-key.json
 
+      - name: Delete deprecated function
+        run: firebase functions:delete recalculateHoldings --region us-central1 --project trading-journal-4922c --force --non-interactive || echo "Old function not found, continuing."
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ./gcloud-sa-key.json
+
       - name: Deploy to Firebase Functions
-        run: firebase deploy --only functions:recalculateHoldingsOnTransactionWrite,functions:recalculateHoldingsOnSplitWrite --project trading-journal-4922c --non-interactive --force
+        run: firebase deploy --only functions --project trading-journal-4922c --non-interactive
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ./gcloud-sa-key.json
