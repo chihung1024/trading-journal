@@ -104,7 +104,7 @@
         let confirmCallback = null;
         let dataLoaded = { transactions: false, holdings: false, splits: false };
 
-        // --- 輔助函式 ---
+        // --- Helper Functions ---
         function formatCurrency(value, decimals = 2) { const num = Number(value); if (isNaN(num)) return '0.00'; return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }); }
         function showNotification(type, message) { 
             const area = document.getElementById('notification-area'); 
@@ -118,6 +118,7 @@
             setTimeout(() => { notification.style.transition = 'opacity 0.5s ease'; notification.style.opacity = '0'; setTimeout(() => notification.remove(), 500); }, 5000); 
         }
         function showConfirm(message, callback) { document.getElementById('confirm-message').textContent = message; confirmCallback = callback; document.getElementById('confirm-modal').classList.remove('hidden'); }
+        function hideConfirm() { confirmCallback = null; document.getElementById('confirm-modal').classList.add('hidden'); }
         function showLoadingError(title, message, link = null) {
             const loadingSpinner = document.getElementById('loading-spinner-icon');
             if (loadingSpinner) loadingSpinner.style.display = 'none';
@@ -157,7 +158,31 @@
             } 
             return NaN; 
         }
+        function openModal(isEdit = false, data = null) {
+            const form = document.getElementById('transaction-form');
+            form.reset();
+            document.getElementById('transaction-id').value = '';
+            if (isEdit && data) {
+                document.getElementById('modal-title').textContent = '編輯交易紀錄';
+                document.getElementById('transaction-id').value = data.id;
+                document.getElementById('transaction-date').value = data.date;
+                document.getElementById('stock-symbol').value = data.symbol;
+                document.querySelector(`input[name="transaction-type"][value="${data.type}"]`).checked = true;
+                document.getElementById('quantity').value = data.quantity;
+                document.getElementById('price').value = data.price;
+                document.getElementById('currency').value = data.currency || 'USD';
+            } else {
+                document.getElementById('modal-title').textContent = '新增交易紀錄';
+                document.getElementById('transaction-date').value = new Date().toISOString().split('T')[0];
+                document.getElementById('currency').value = 'USD';
+            }
+            document.getElementById('transaction-modal').classList.remove('hidden');
+        }
+        function closeModal() { document.getElementById('transaction-modal').classList.add('hidden'); }
+        function openSplitModal() { document.getElementById('split-modal').classList.remove('hidden'); }
+        function closeSplitModal() { document.getElementById('split-modal').classList.add('hidden'); }
 
+        // --- Main App Logic ---
         document.addEventListener('DOMContentLoaded', () => {
             const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
             auth = getAuth(app);
@@ -387,49 +412,7 @@
             if (transaction) openModal(true, transaction); 
         }
         
-        function openModal(isEdit = false, data = null) {
-            const form = document.getElementById('transaction-form');
-            form.reset();
-            document.getElementById('transaction-id').value = '';
-            if (isEdit && data) {
-                document.getElementById('modal-title').textContent = '編輯交易紀錄';
-                Object.keys(data).forEach(key => {
-                    const el = form.elements[key];
-                    if (el) {
-                        if (el.type === 'radio') el.checked = el.value === data[key];
-                        else el.value = data[key];
-                    }
-                });
-                document.getElementById('transaction-id').value = data.id;
-            } else {
-                document.getElementById('modal-title').textContent = '新增交易紀錄';
-                form.elements.date.value = new Date().toISOString().split('T')[0];
-                form.elements.currency.value = 'USD';
-            }
-            document.getElementById('transaction-modal').classList.remove('hidden');
-        }
-        function closeModal() { document.getElementById('transaction-modal').classList.add('hidden'); }
-
         // --- Split Modal Functions ---
-        function openSplitModal() { document.getElementById('split-modal').classList.remove('hidden'); }
-        function closeSplitModal() { document.getElementById('split-modal').classList.add('hidden'); }
-        
-        async function handleSplitFormSubmit(e) {
-            e.preventDefault();
-            const data = {
-                symbol: document.getElementById('split-symbol').value.toUpperCase().trim(),
-                date: new Date(document.getElementById('split-date').value),
-                ratio: parseFloat(document.getElementById('split-ratio').value)
-            };
-            if (!data.symbol || !data.date || isNaN(data.ratio)) return showNotification('error', '請填寫所有欄位。');
-
-            try {
-                await addDoc(collection(db, 'users', userId, 'manual_splits'), data);
-                showNotification('success', '手動拆股紀錄已新增！後端正在重新計算...');
-                document.getElementById('split-form').reset();
-            } catch (error) { showNotification('error', "新增失敗: " + error.message); }
-        }
-
         function renderManualSplitsList() {
             const listEl = document.getElementById('manual-splits-list');
             listEl.innerHTML = '';
@@ -451,6 +434,22 @@
             });
             document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit));
             lucide.createIcons({ context: listEl });
+        }
+
+        async function handleSplitFormSubmit(e) {
+            e.preventDefault();
+            const data = {
+                symbol: document.getElementById('split-symbol').value.toUpperCase().trim(),
+                date: new Date(document.getElementById('split-date').value),
+                ratio: parseFloat(document.getElementById('split-ratio').value)
+            };
+            if (!data.symbol || !data.date || isNaN(data.ratio)) return showNotification('error', '請填寫所有欄位。');
+
+            try {
+                await addDoc(collection(db, 'users', userId, 'manual_splits'), data);
+                showNotification('success', '手動拆股紀錄已新增！後端正在重新計算...');
+                document.getElementById('split-form').reset();
+            } catch (error) { showNotification('error', "新增失敗: " + error.message); }
         }
 
         async function handleDeleteSplit(e) {
