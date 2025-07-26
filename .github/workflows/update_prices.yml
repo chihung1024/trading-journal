@@ -19,6 +19,6 @@ jobs:
           pip install -r requirements.txt
       - name: Run script
         run: |
-          python -c "from main import update_data; update_data(None, None)"
+          python main.py
         env:
           FIREBASE_ADMIN_CREDENTIALS: ${{ secrets.FIREBASE_ADMIN_CREDENTIALS }}
