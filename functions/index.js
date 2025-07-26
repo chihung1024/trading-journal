@@ -1,50 +1,45 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const yahooFinance = require("yahoo-finance2").default;
 
 admin.initializeApp();
-
 const db = admin.firestore();
 
-// 當交易紀錄有任何變動時，觸發此函式
-exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540 }).firestore
+// Main Cloud Function triggered by any change in a user's transactions.
+exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
         const { userId } = context.params;
-
-        console.log(`Recalculating holdings for user: ${userId}`);
+        console.log(`--- Recalculation triggered for user: ${userId} ---`);
 
         const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
         const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
 
-        // 1. 獲取該使用者的所有交易紀錄
-        const transactionsRef = db.collection(`users/${userId}/transactions`);
-        const snapshot = await transactionsRef.get();
-        const transactions = snapshot.docs.map(doc => doc.data());
+        // 1. Get all transactions for the user.
+        const transactionsSnapshot = await db.collection(`users/${userId}/transactions`).get();
+        const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-        // **新增：如果沒有交易紀錄，則清空所有資料**
+        // If no transactions exist, clear all data and exit.
         if (transactions.length === 0) {
-            console.log(`No transactions found for user ${userId}. Clearing all data.`);
-            // 使用 Promise.all 來同時執行刪除/清空操作
+            console.log(`No transactions found for user ${userId}. Clearing all portfolio data.`);
             await Promise.all([
-                holdingsDocRef.set({ holdings: {}, realizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
                 historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
             ]);
-            return null; // 結束函式
+            return null;
         }
 
-        // 2. 獲取市場資料 (股價和匯率) - 已升級為智慧模式
+        // 2. Get all necessary market data from our Firestore database.
         const marketData = await getMarketDataFromDb(transactions);
 
-        // 3. 計算當前持股 和 資產歷史
-        const { holdings, realizedPL } = calculateCurrentHoldings(transactions, marketData);
-        const portfolioHistory = calculatePortfolioHistory(transactions, marketData);
+        // 3. Perform the core calculation using the event timeline model.
+        const { holdings, totalRealizedPL, portfolioHistory } = calculatePortfolio(transactions, marketData);
 
-        // 4. 將計算結果存回 Firestore
+        // 4. Save the newly calculated results back to Firestore.
+        console.log(`Saving calculated data for user ${userId}. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}`);
         await Promise.all([
             holdingsDocRef.set({
                 holdings: holdings,
-                realizedPL: realizedPL,
+                totalRealizedPL: totalRealizedPL,
                 lastUpdated: admin.firestore.FieldValue.serverTimestamp()
             }),
             historyDocRef.set({
@@ -53,238 +48,224 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540 }).firesto
             })
         ]);
 
+        console.log(`--- Recalculation finished for user: ${userId} ---`);
         return null;
     });
 
+/**
+ * Fetches all required market data (prices, splits, dividends, rates) from Firestore.
+ * This function no longer calls external APIs.
+ */
 async function getMarketDataFromDb(transactions) {
-    const marketData = {};
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
-    const allSymbols = [...symbols, "TWD=X"];
+    const marketData = {};
+    const promises = [];
 
-    for (const symbol of allSymbols) {
-        const isForex = symbol === "TWD=X";
-        const collectionName = isForex ? "exchange_rates" : "price_history";
-        
-        const docRef = db.collection(collectionName).doc(symbol);
-        const doc = await docRef.get();
-
-        if (doc.exists) {
-            // 【修正】直接獲取整個文檔，確保 prices 和 splits 都被讀取
-            marketData[symbol] = doc.data();
-        } else {
-            // 【智慧升級】如果資料不存在，立即觸發即時抓取
-            console.log(`Market data for ${symbol} not found in DB. Fetching from API...`);
-            const newData = await fetchAndSaveMarketData(symbol);
-            if (newData) {
-                marketData[symbol] = newData;
+    // Fetch stock data (prices, splits, dividends)
+    for (const symbol of symbols) {
+        const docRef = db.collection("price_history").doc(symbol);
+        promises.push(docRef.get().then(doc => {
+            if (doc.exists) {
+                marketData[symbol] = doc.data();
+            } else {
+                console.error(`FATAL: Market data for symbol '${symbol}' not found in Firestore. Calculations may be incorrect.`);
+                marketData[symbol] = { prices: {}, splits: {}, dividends: {} }; // Provide empty data to prevent crashes
             }
-        }
+        }));
     }
+
+    // Fetch exchange rate data
+    const ratesDocRef = db.collection("exchange_rates").doc("TWD=X");
+    promises.push(ratesDocRef.get().then(doc => {
+        if (doc.exists) {
+            marketData["TWD=X"] = doc.data();
+        } else {
+            console.error("FATAL: Exchange rate data 'TWD=X' not found in Firestore. Calculations will be incorrect.");
+            marketData["TWD=X"] = { rates: {} };
+        }
+    }));
+
+    await Promise.all(promises);
+    console.log(`Successfully fetched market data for ${Object.keys(marketData).length} symbols from Firestore.`);
     return marketData;
 }
 
-async function fetchAndSaveMarketData(symbol) {
-    try {
-        const isForex = symbol === "TWD=X";
-        const collectionName = isForex ? "exchange_rates" : "price_history";
+/**
+ * The core calculation engine based on an event timeline.
+ */
+function calculatePortfolio(transactions, marketData) {
+    const events = [];
+    const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
-        if (isForex) {
-            // 處理匯率
-            const queryOptions = { period1: '2000-01-01' };
-            const result = await yahooFinance.historical(symbol, queryOptions);
-            if (!result || result.length === 0) return null;
+    // 1. Populate the event timeline from transactions, splits, and dividends
+    for (const t of transactions) {
+        events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' });
+    }
+    for (const symbol of symbols) {
+        const stockData = marketData[symbol] || {};
+        Object.entries(stockData.splits || {}).forEach(([date, ratio]) => {
+            events.push({ date: new Date(date), symbol, ratio, eventType: 'split' });
+        });
+        Object.entries(stockData.dividends || {}).forEach(([date, amount]) => {
+            events.push({ date: new Date(date), symbol, amount, eventType: 'dividend' });
+        });
+    }
+    events.sort((a, b) => a.date - b.date);
 
-            const newMarketData = {};
-            for (const item of result) {
-                newMarketData[item.date.toISOString().split('T')[0]] = item.close;
+    // 2. Process the timeline
+    const portfolio = {}; // Tracks state of each holding
+    let totalRealizedPL = 0;
+    const portfolioHistory = {};
+    let lastProcessedDate = null;
+
+    for (const event of events) {
+        const eventDate = event.date;
+        const eventDateStr = eventDate.toISOString().split('T')[0];
+
+        // Generate daily portfolio snapshots for dates between events
+        if (lastProcessedDate) {
+            let currentDate = new Date(lastProcessedDate);
+            currentDate.setDate(currentDate.getDate() + 1);
+            while (currentDate < eventDate) {
+                const dateStr = currentDate.toISOString().split('T')[0];
+                portfolioHistory[dateStr] = calculateDailyMarketValue(portfolio, marketData, currentDate);
+                currentDate.setDate(currentDate.getDate() + 1);
             }
-            await db.collection(collectionName).doc(symbol).set({ rates: newMarketData, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
-            console.log(`Successfully fetched and saved ${Object.keys(newMarketData).length} data points for ${symbol}.`);
-            return { prices: newMarketData, splits: {} }; // 回傳統一格式
-        } else {
-            // 處理股票 (股價 + 分割)
-            const queryOptions = { period1: '2000-01-01', events: 'split' };
-            const [priceHistory, splitHistory] = await Promise.all([
-                yahooFinance.historical(symbol, { period1: '2000-01-01' }),
-                yahooFinance.historical(symbol, queryOptions).then(r => r.splits)
-            ]);
-
-            const prices = {};
-            if (priceHistory) {
-                for (const item of priceHistory) {
-                    prices[item.date.toISOString().split('T')[0]] = item.close;
-                }
-            }
-
-            const splits = {};
-            if (splitHistory) {
-                for (const item of splitHistory) {
-                    splits[item.date.toISOString().split('T')[0]] = item.numerator / item.denominator;
-                }
-            }
-
-            const payload = {
-                prices: prices,
-                splits: splits,
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-                dataSource: 'yahoo-finance2-live',
-            };
-
-            await db.collection(collectionName).doc(symbol).set(payload);
-            console.log(`Successfully fetched and saved data for ${symbol}: ${Object.keys(prices).length} prices, ${Object.keys(splits).length} splits.`);
-            return { prices, splits };
         }
 
-    } catch (error) {
-        console.error(`Error fetching or saving market data for ${symbol}:`, error);
-        return null;
-    }
-}
+        const symbol = event.symbol.toUpperCase();
+        if (!portfolio[symbol]) {
+            portfolio[symbol] = { quantity: 0, totalCostTWD: 0, currency: 'USD' };
+        }
 
-function calculateCurrentHoldings(transactions, marketData) {
-    const holdings = {};
-    let totalRealizedPL = 0;
-    const rateHistory = marketData["TWD=X"]?.rates || {};
-    console.log(`取得匯率歷史，共 ${Object.keys(rateHistory).length} 筆`);
+        const rateHistory = marketData["TWD=X"]?.rates || {};
+        const rateOnDate = findNearestRate(rateHistory, eventDate);
 
-    const allSymbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
-
-    for (const symbol of allSymbols) {
-        console.log(`--- 開始計算股票: ${symbol} ---`);
-        const symbolTransactions = transactions.filter(t => t.symbol.toUpperCase() === symbol);
-        const priceHistory = marketData[symbol]?.prices || {};
-        const splitHistory = marketData[symbol]?.splits || {};
-        const currency = symbolTransactions[0]?.currency || 'TWD';
-        console.log(`幣別為: ${currency}`);
-
-        // 1. 建立包含交易與分割的事件列表
-        const events = [];
-        symbolTransactions.forEach(t => events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' }));
-        Object.keys(splitHistory).forEach(dateStr => events.push({ date: new Date(dateStr), splitRatio: splitHistory[dateStr], eventType: 'split' }));
-        events.sort((a, b) => a.date - b.date);
-
-        // 2. 迭代事件，計算持股與成本
-        let currentShares = 0;
-        let totalCostOriginal = 0; // 原幣總成本
-        let totalCostTWD = 0;      // 台幣總成本
-        let realizedPLTWD = 0;     // 已實現台幣損益
-        let symbolRealizedPLTWD = 0; // 用於計算單一持股的已實現損益
-
-        for (const event of events) {
-            if (event.eventType === 'transaction') {
+        switch (event.eventType) {
+            case 'transaction':
                 const t = event;
-                const t_shares = parseFloat(t.quantity) || 0;
-                const t_price = parseFloat(t.price) || 0;
-                const t_date = t.date;
-                
-                let rateOnTransactionDate = 1;
-                if (currency === 'USD') {
-                    const foundRate = findPriceForDate(rateHistory, t_date);
-                    if (foundRate === null) {
-                        console.error(`FATAL: 找不到 ${symbol} 在 ${t_date.toISOString().split('T')[0]} 的匯率！成本計算將不準確！`);
-                        // 在此中斷或使用一個標記來表示錯誤，而不是靜默地使用 1
-                        rateOnTransactionDate = 1; // 保持計算，但日誌會標示錯誤
-                    } else {
-                        rateOnTransactionDate = foundRate;
-                    }
-                }
-
-                const valueOriginal = t_shares * t_price;
-                const valueTWD = valueOriginal * rateOnTransactionDate;
+                portfolio[symbol].currency = t.currency; // Update currency from latest transaction
+                const valueOriginal = t.quantity * t.price;
+                const valueTWD = valueOriginal * (t.currency === 'USD' ? rateOnDate : 1);
 
                 if (t.type === 'buy') {
-                    currentShares += t_shares;
-                    totalCostOriginal += valueOriginal;
-                    totalCostTWD += valueTWD;
+                    portfolio[symbol].quantity += t.quantity;
+                    portfolio[symbol].totalCostTWD += valueTWD;
                 } else if (t.type === 'sell') {
-                    if (currentShares > 0) {
-                        const proportionOfSharesSold = t_shares / currentShares;
-                        const costOfSoldSharesTWD = totalCostTWD * proportionOfSharesSold;
-
-                        symbolRealizedPLTWD += valueTWD - costOfSoldSharesTWD;
-                        
-                        totalCostOriginal *= (1 - proportionOfSharesSold);
-                        totalCostTWD *= (1 - proportionOfSharesSold);
-                        currentShares -= t_shares;
+                    if (portfolio[symbol].quantity > 0) {
+                        const costOfSoldShares = (portfolio[symbol].totalCostTWD / portfolio[symbol].quantity) * t.quantity;
+                        const realizedPL = valueTWD - costOfSoldShares;
+                        totalRealizedPL += realizedPL;
+                        portfolio[symbol].totalCostTWD -= costOfSoldShares;
+                        portfolio[symbol].quantity -= t.quantity;
                     }
-                } else if (t.type === 'dividend') {
-                    symbolRealizedPLTWD += valueTWD;
                 }
-            } else if (event.eventType === 'split') {
-                currentShares *= event.splitRatio;
-            }
+                break;
+
+            case 'split':
+                portfolio[symbol].quantity *= event.ratio;
+                break;
+
+            case 'dividend':
+                const dividendTWD = event.amount * portfolio[symbol].quantity * (portfolio[symbol].currency === 'USD' ? rateOnDate : 1);
+                totalRealizedPL += dividendTWD;
+                break;
         }
+        
+        // Record portfolio value on the day of the event
+        portfolioHistory[eventDateStr] = calculateDailyMarketValue(portfolio, marketData, eventDate);
+        lastProcessedDate = eventDate;
+    }
 
-        // 3. 計算最終持股數據
-        if (currentShares > 1e-9) {
-            const latestPrice = findPriceForDate(priceHistory, new Date());
-            if (latestPrice === null) {
-                console.error(`FATAL: 找不到 ${symbol} 的最新價格！將跳過此股票。`);
-                continue; // 如果沒有價格，則無法計算市值，直接跳過
-            }
+    // 3. Generate history from the last event to today
+    if (lastProcessedDate) {
+        let currentDate = new Date(lastProcessedDate);
+        currentDate.setDate(currentDate.getDate() + 1);
+        const today = new Date();
+        while (currentDate <= today) {
+            const dateStr = currentDate.toISOString().split('T')[0];
+            portfolioHistory[dateStr] = calculateDailyMarketValue(portfolio, marketData, currentDate);
+            currentDate.setDate(currentDate.getDate() + 1);
+        }
+    }
 
-            let latestRate = 1;
-            if (currency === 'USD') {
-                const foundRate = findPriceForDate(rateHistory, new Date());
-                if (foundRate === null) {
-                    console.error(`FATAL: 找不到今天的匯率！市值計算將不準確！`);
-                    latestRate = 1; // 保持計算，但日誌會標示錯誤
-                } else {
-                    latestRate = foundRate;
-                }
-            }
-            
-            const marketValueTWD = currentShares * latestPrice * latestRate;
-            const unrealizedPLTWD = marketValueTWD - totalCostTWD;
-            const returnRate = totalCostTWD > 0 ? (unrealizedPLTWD / totalCostTWD) * 100 : 0;
+    // 4. Calculate final holdings details
+    const finalHoldings = {};
+    const today = new Date();
+    const latestRate = findNearestRate(marketData["TWD=X"]?.rates || {}, today);
 
-            holdings[symbol] = {
+    for (const symbol of Object.keys(portfolio)) {
+        const holding = portfolio[symbol];
+        if (holding.quantity > 1e-9) { // Use a small epsilon for float comparison
+            const priceHistory = marketData[symbol]?.prices || {};
+            const latestPrice = findNearestPrice(priceHistory, today);
+            const rate = holding.currency === 'USD' ? latestRate : 1;
+            const marketValueTWD = holding.quantity * latestPrice * rate;
+            const unrealizedPLTWD = marketValueTWD - holding.totalCostTWD;
+
+            finalHoldings[symbol] = {
                 symbol: symbol,
-                quantity: currentShares,
-                avgCost: currentShares > 0 ? totalCostOriginal / currentShares : 0,
-                totalCostTWD: totalCostTWD,
-                currency: currency,
+                quantity: holding.quantity,
+                totalCostTWD: holding.totalCostTWD,
+                avgCostTWD: holding.quantity > 0 ? holding.totalCostTWD / holding.quantity : 0,
+                currency: holding.currency,
                 currentPrice: latestPrice,
                 marketValueTWD: marketValueTWD,
                 unrealizedPLTWD: unrealizedPLTWD,
-                realizedPLTWD: symbolRealizedPLTWD, // 返回此持股本身的已實現損益
-                returnRate: returnRate,
+                returnRate: holding.totalCostTWD > 0 ? (unrealizedPLTWD / holding.totalCostTWD) * 100 : 0,
             };
-        } else {
-            // 如果股票已全部賣出，其所有損益都已實現
-            totalRealizedPL += symbolRealizedPLTWD;
         }
     }
 
-    return { holdings: holdings, realizedPL: totalRealizedPL };
+    return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
-function findPriceForDate(history, targetDate) {
-    if (!history || Object.keys(history).length === 0) return null;
+function calculateDailyMarketValue(portfolio, marketData, date) {
+    let totalValue = 0;
+    const rateOnDate = findNearestRate(marketData["TWD=X"]?.rates || {}, date);
 
-    // Create a new date object to avoid modifying the original
-    const adjustedDate = new Date(targetDate.getTime());
+    for (const symbol in portfolio) {
+        const holding = portfolio[symbol];
+        if (holding.quantity > 0) {
+            const priceOnDate = findNearestPrice(marketData[symbol]?.prices || {}, date);
+            const rate = holding.currency === 'USD' ? rateOnDate : 1;
+            totalValue += holding.quantity * priceOnDate * rate;
+        }
+    }
+    return totalValue;
+}
 
-    // Add 12 hours to push the date into the correct day, compensating for timezone offsets.
-    // A user in UTC+8 entering '2009-03-03 00:00:00' gets stored as '2009-03-02 16:00:00Z'.
-    // Adding 12 hours makes it '2009-03-03 04:00:00Z'.
-    // toISOString().split('T')[0] will now correctly be '2009-03-03'.
-    adjustedDate.setUTCHours(adjustedDate.getUTCHours() + 12);
-    
-    const targetDateStr = adjustedDate.toISOString().split('T')[0];
+function findNearestPrice(priceHistory, targetDate) {
+    return findNearestDataPoint(priceHistory, targetDate);
+}
 
-    // Now, search backwards from the adjusted date for up to 7 days
+function findNearestRate(rateHistory, targetDate) {
+    return findNearestDataPoint(rateHistory, targetDate);
+}
+
+/**
+ * A robust function to find the closest available data point for a given date.
+ * It searches backwards up to 7 days, then falls back to the closest earlier date.
+ */
+function findNearestDataPoint(history, targetDate) {
+    if (!history || Object.keys(history).length === 0) return 1; // Return a neutral value
+
+    const d = new Date(targetDate);
+    d.setUTCHours(12, 0, 0, 0); // Normalize date to avoid timezone issues
+
+    // Search backwards for up to 7 days
     for (let i = 0; i < 7; i++) {
-        const d = new Date(adjustedDate.getTime());
-        d.setUTCDate(d.getUTCDate() - i);
-        const d_str = d.toISOString().split('T')[0];
-        if (history[d_str]) {
-            return history[d_str];
+        const searchDate = new Date(d);
+        searchDate.setDate(searchDate.getDate() - i);
+        const dateStr = searchDate.toISOString().split('T')[0];
+        if (history[dateStr] !== undefined) {
+            return history[dateStr];
         }
     }
 
-    // Fallback to find the last available date before the target date
+    // Fallback: find the last available date before the target date
     const sortedDates = Object.keys(history).sort();
+    const targetDateStr = d.toISOString().split('T')[0];
     let closestDate = null;
     for (const dateStr of sortedDates) {
         if (dateStr <= targetDateStr) {
@@ -297,74 +278,6 @@ function findPriceForDate(history, targetDate) {
         return history[closestDate];
     }
 
-    return null;
-}
-
-function getDatesBetween(startDate, endDate) {
-    const dates = [];
-    let currentDate = new Date(startDate);
-    currentDate.setUTCHours(0, 0, 0, 0);
-    const finalDate = new Date(endDate);
-    finalDate.setUTCHours(0, 0, 0, 0);
-
-    while (currentDate <= finalDate) {
-        dates.push(new Date(currentDate));
-        currentDate.setDate(currentDate.getDate() + 1);
-    }
-    return dates;
-}
-
-function calculatePortfolioHistory(transactions, marketData) {
-    if (transactions.length === 0) {
-        return {};
-    }
-
-    const portfolioHistory = {};
-    const sortedTransactions = transactions.sort((a, b) => (a.date.toDate ? a.date.toDate() : new Date(a.date)) - (b.date.toDate ? b.date.toDate() : new Date(b.date)));
-    const firstDate = sortedTransactions[0].date.toDate ? sortedTransactions[0].date.toDate() : new Date(sortedTransactions[0].date);
-    const today = new Date();
-
-    const allDates = getDatesBetween(firstDate, today);
-    const rateHistory = marketData["TWD=X"] || {};
-
-    for (const date of allDates) {
-        const dateStr = date.toISOString().split('T')[0];
-        const dailyHoldings = {};
-        const relevantTransactions = sortedTransactions.filter(t => (t.date.toDate ? t.date.toDate() : new Date(t.date)) <= date);
-
-        for (const t of relevantTransactions) {
-            const symbol = t.symbol.toUpperCase();
-            if (!dailyHoldings[symbol]) {
-                dailyHoldings[symbol] = { quantity: 0, currency: t.currency || 'TWD' };
-            }
-            const quantity = t.quantity || 0;
-            if (t.type === 'buy') {
-                dailyHoldings[symbol].quantity += quantity;
-            } else if (t.type === 'sell') {
-                dailyHoldings[symbol].quantity -= quantity;
-            }
-        }
-
-        let dailyMarketValue = 0;
-        const rateOnDate = findPriceForDate(rateHistory, date) || 1;
-
-        for (const symbol in dailyHoldings) {
-            const h_data = dailyHoldings[symbol];
-            if (h_data.quantity > 1e-9) {
-                const priceHistory = marketData[symbol] || {};
-                const priceOnDate = findPriceForDate(priceHistory, date);
-
-                if (priceOnDate !== null) {
-                    const rate = h_data.currency === 'USD' ? rateOnDate : 1;
-                    dailyMarketValue += h_data.quantity * priceOnDate * rate;
-                }
-            }
-        }
-
-        if (dailyMarketValue > 0) {
-            portfolioHistory[dateStr] = dailyMarketValue;
-        }
-    }
-
-    return portfolioHistory;
+    console.warn(`Could not find any historical data point for date: ${targetDateStr}`);
+    return 1; // Return neutral value if no data is found
 }
