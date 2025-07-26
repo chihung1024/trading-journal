@@ -3,137 +3,125 @@ import yfinance as yf
 import firebase_admin
 from firebase_admin import credentials, firestore, get_app
 import json
-from datetime import datetime, timedelta, date
+from datetime import datetime
+import pandas as pd
 
-# 初始化 Firebase
-try:
-    service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
-    cred = credentials.Certificate(service_account_info)
-    project_id = service_account_info.get("project_id")
-    firebase_admin.initialize_app(cred, {
-        'projectId': project_id
-    })
-except (ValueError, KeyError) as e:
-    print(f"Firebase 初始化失敗: {e}。請確保 FIREBASE_SERVICE_ACCOUNT 環境變數已正確設定。")
-    # 本地測試備用方案
-    # cred = credentials.Certificate("path/to/serviceAccountKey.json")
-    # firebase_admin.initialize_app(cred)
+def initialize_firebase():
+    """Initializes Firebase connection if not already initialized."""
+    try:
+        get_app()
+        print("Firebase app already initialized.")
+    except ValueError:
+        try:
+            service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
+            cred = credentials.Certificate(service_account_info)
+            project_id = service_account_info.get("project_id")
+            firebase_admin.initialize_app(cred, {'projectId': project_id})
+            print("Firebase initialized successfully.")
+        except (ValueError, KeyError) as e:
+            print(f"CRITICAL: Firebase initialization failed: {e}. Ensure FIREBASE_SERVICE_ACCOUNT is set.")
+            exit(1)
+    return firestore.client()
 
-db = firestore.client()
-try:
-    PROJECT_ID = get_app().project_id
-except ValueError:
-    PROJECT_ID = service_account_info.get("project_id")
-
-if not PROJECT_ID:
-    raise ValueError("無法確定 Firebase Project ID，請檢查服務帳號憑證。")
-
-def get_all_user_ids():
-    """獲取所有存在過資料的使用者ID"""
-    user_ids = set()
-    users_ref = db.collection("users")
-    for user_doc in users_ref.stream():
-        user_ids.add(user_doc.id)
-    return list(user_ids)
-
-def get_all_user_transactions():
-    """使用 collection_group 查詢獲取所有使用者的交易紀錄並按使用者分組"""
-    all_transactions = {}
+def get_all_symbols_from_transactions(db):
+    """
+    Scans the 'transactions' collection group to find all unique stock symbols
+    across all users.
+    """
+    all_symbols = set()
     transactions_group = db.collection_group("transactions")
     for trans_doc in transactions_group.stream():
-        path_parts = trans_doc.reference.path.split('/')
-        if len(path_parts) >= 3 and path_parts[0] == 'users':
-            uid = path_parts[1]
-            if uid not in all_transactions:
-                all_transactions[uid] = []
-            
-            data = trans_doc.to_dict()
-            data['id'] = trans_doc.id
-            if 'date' in data and hasattr(data['date'], 'strftime'):
-                 data['date'] = data['date'].strftime('%Y-%m-%d')
-            elif 'date' in data and isinstance(data['date'], str):
-                 try:
-                    data['date'] = datetime.fromisoformat(data['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-                 except ValueError:
-                    pass
-            all_transactions[uid].append(data)
+        try:
+            symbol = trans_doc.to_dict().get('symbol')
+            if symbol:
+                all_symbols.add(symbol.upper())
+        except Exception as e:
+            print(f"Warning: Could not process transaction doc {trans_doc.id}. Error: {e}")
+    print(f"Found {len(all_symbols)} unique symbols across all users: {list(all_symbols)}")
+    return list(all_symbols)
 
-    for uid in all_transactions:
-        all_transactions[uid] = sorted(all_transactions[uid], key=lambda x: x['date'])
-        
-    return all_transactions
-
-def fetch_and_update_market_data(symbols):
-    """增量更新市場資料"""
-    all_symbols = list(symbols) + ["TWD=X"]
+def fetch_and_update_market_data(db, symbols):
+    """
+    Fetches and updates historical prices, splits, and dividends for a list of symbols.
+    Also handles exchange rate updates for TWD=X.
+    """
+    all_symbols_to_update = list(set(symbols + ["TWD=X"]))
     
-    for symbol in all_symbols:
+    for symbol in all_symbols_to_update:
         is_forex = symbol == "TWD=X"
         collection_name = "exchange_rates" if is_forex else "price_history"
         doc_ref = db.collection(collection_name).document(symbol)
         
-        start_date = None
-        try:
-            doc = doc_ref.get()
-            if doc.exists:
-                last_updated_str = doc.to_dict().get("lastUpdated")
-                start_date = datetime.fromisoformat(last_updated_str).date() + timedelta(days=1)
-        except Exception as e:
-            print(f"讀取 {symbol} 的最後更新日期失敗: {e}")
-
-        if start_date is None:
-            start_date = date(2000, 1, 1)
-
-        if start_date > date.today():
-            print(f"{symbol} 的資料已經是最新，無需更新。")
-            continue
+        # For robustness and to ensure data integrity with splits/dividends,
+        # we fetch the full history each time and overwrite the document.
+        start_date = "2000-01-01"
+        
+        print(f"--- Processing: {symbol} ---")
+        print(f"Fetching full history for {symbol} from {start_date}...")
 
         try:
-            print(f"正在抓取 {symbol} 從 {start_date.strftime('%Y-%m-%d')} 開始的資料...")
             stock = yf.Ticker(symbol)
             
-            # 抓取股價和分割歷史
+            # 1. Fetch Price History (Close prices)
             hist = stock.history(start=start_date, interval="1d", auto_adjust=False, back_adjust=False)
-            splits = stock.splits
             
-            update_payload = {}
+            # 2. Fetch Splits and Dividends History
+            splits = stock.splits
+            dividends = stock.dividends if not is_forex else None
+
+            payload = {}
 
             if not hist.empty:
-                new_prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items()}
-                update_payload["prices"] = new_prices
-                print(f"成功抓取 {symbol} 的 {len(new_prices)} 筆新股價。")
+                prices_data = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if not pd.isna(val)}
+                payload["prices"] = prices_data
+                print(f"Found {len(prices_data)} price points.")
+            
+            if is_forex:
+                payload = {
+                    "rates": payload.get("prices", {}),
+                    "lastUpdated": datetime.now().isoformat(),
+                    "dataSource": "yfinance",
+                    "description": "Historical daily exchange rates for USD to TWD."
+                }
+            else: # It's a stock
+                if splits is not None and not splits.empty:
+                    splits_data = {idx.strftime('%Y-%m-%d'): val for idx, val in splits.items()}
+                    payload["splits"] = splits_data
+                    print(f"Found {len(splits_data)} split events.")
+                else:
+                    payload["splits"] = {}
 
-            if not splits.empty:
-                new_splits = {idx.strftime('%Y-%m-%d'): val for idx, val in splits.items()}
-                update_payload["splits"] = new_splits
-                print(f"成功抓取 {symbol} 的 {len(new_splits)} 筆分割歷史。")
+                if dividends is not None and not dividends.empty:
+                    dividends_data = {idx.strftime('%Y-%m-%d'): val for idx, val in dividends.items()}
+                    payload["dividends"] = dividends_data
+                    print(f"Found {len(dividends_data)} dividend events.")
+                else:
+                    payload["dividends"] = {}
+                
+                payload["lastUpdated"] = datetime.now().isoformat()
+                payload["dataSource"] = "yfinance"
 
-            if update_payload:
-                update_payload["lastUpdated"] = datetime.now().isoformat()
-                doc_ref.set(update_payload, merge=True)
-                print(f"成功更新 {symbol} 的資料。")
+            if payload.get("prices") or payload.get("rates"):
+                doc_ref.set(payload)
+                print(f"Successfully wrote complete market data for {symbol} to Firestore.")
             else:
-                print(f"找不到 {symbol} 在 {start_date.strftime('%Y-%m-%d')}之後的新資料。")
+                print(f"Warning: No data found for {symbol}. Skipping database write.")
 
         except Exception as e:
-            print(f"抓取或儲存 {symbol} 資料時發生錯誤: {e}")
-
-
+            print(f"ERROR: Failed to fetch or save data for {symbol}. Reason: {e}")
 
 if __name__ == "__main__":
-    print("開始執行每日市場資料更新腳本...")
+    db_client = initialize_firebase()
     
-    # 獲取所有有交易紀錄的使用者，以確定需要哪些市場資料
-    transactions_by_user = get_all_user_transactions()
-    all_symbols = set()
-    for uid, transactions in transactions_by_user.items():
-        for t in transactions:
-            all_symbols.add(t['symbol'].upper())
+    print("
+Starting daily market data update script...")
+    
+    symbols_to_update = get_all_symbols_from_transactions(db_client)
 
-    # 根據找到的股票代碼，更新市場資料
-    if all_symbols:
-        fetch_and_update_market_data(all_symbols)
+    if symbols_to_update:
+        fetch_and_update_market_data(db_client, symbols_to_update)
     else:
-        print("找不到任何交易紀錄，無需更新市場資料。")
+        print("No user transactions found. No market data to update.")
 
-    print("市場資料更新完成！")
+    print("
+Market data update script finished.")
