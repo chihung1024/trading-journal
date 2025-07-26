@@ -143,20 +143,28 @@ const firebaseConfig = {
           for (const stockId in holdings) {
             const holding = holdings[stockId];
             db.collection('stocks').doc(stockId).get().then(stockDoc => {
-              const stock = stockDoc.data();
-              const rate = rates[selectedCurrency] / rates[stock.currency];
-              const marketValue = holding.shares * stock.price * rate;
-              const costBasis = holding.cost * rate;
-              const gainLoss = marketValue - costBasis;
-              const row = holdingsTable.insertRow();
-              row.innerHTML = `
-                <td>${stockId}</td>
-                <td>${holding.shares.toFixed(2)}</td>
-                <td>${formatCurrency(stock.price * rate)}</td>
-                <td>${formatCurrency(marketValue)}</td>
-                <td>${formatCurrency(costBasis)}</td>
-                <td>${formatCurrency(gainLoss)}</td>
-              `;
+              if (stockDoc.exists) {
+                const stock = stockDoc.data();
+                if (stock && stock.currency && typeof stock.price !== 'undefined') {
+                  const rate = rates[selectedCurrency] / rates[stock.currency];
+                  const marketValue = holding.shares * stock.price * rate;
+                  const costBasis = holding.cost * rate;
+                  const gainLoss = marketValue - costBasis;
+                  const row = holdingsTable.insertRow();
+                  row.innerHTML = `
+                    <td>${stockId}</td>
+                    <td>${holding.shares.toFixed(2)}</td>
+                    <td>${formatCurrency(stock.price * rate)}</td>
+                    <td>${formatCurrency(marketValue)}</td>
+                    <td>${formatCurrency(costBasis)}</td>
+                    <td>${formatCurrency(gainLoss)}</td>
+                  `;
+                } else {
+                  console.error(`Stock data for ${stockId} is incomplete.`, stock);
+                }
+              } else {
+                console.error(`Document for stock ${stockId} not found in 'stocks' collection.`);
+              }
             });
           }
         });
