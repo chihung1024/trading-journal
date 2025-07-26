@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 使用者資料: 允許使用者讀寫自己的資料
+    match /users/{userId}/{collection}/{docId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 市場資料: 允許任何已登入的使用者讀取
+    match /price_history/{symbol} {
+      allow read: if request.auth != null;
+      allow write: if false; // 只能由後端服務寫入
+    }
+
+    match /exchange_rates/{pair} {
+      allow read: if request.auth != null;
+      allow write: if false; // 只能由後端服務寫入
+    }
+  }
+}
