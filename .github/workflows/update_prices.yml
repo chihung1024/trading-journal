@@ -1,36 +1,24 @@
-name: Update Stock Prices
+name: Update Data
 
 on:
-  workflow_dispatch:        # 手動執行
   schedule:
-    - cron: '0 0 * * *'     # 每日 00:00 UTC（台灣 08:00）
+    - cron: '0 0 * * *'
 
 jobs:
-  update-prices:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v2
         with:
-          python-version: '3.9'
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
+          python-version: 3.9
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance firebase-admin
-
-      - name: Run price-update script
+          pip install -r requirements.txt
+      - name: Run script
+        run: |
+          python -c "from main import update_data; update_data(None, None)"
         env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        run: python main.py
+          FIREBASE_ADMIN_CREDENTIALS: ${{ secrets.FIREBASE_ADMIN_CREDENTIALS }}
