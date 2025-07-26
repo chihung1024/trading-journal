@@ -1,5 +1,6 @@
 """
-僅負責『第一次』匯入 TWD=X 匯率（前復權對匯率無意義，程式保持不變）
+僅首次佈署時執行：
+  • 匯入 2000-01-01 ~ 今日 的 USD→TWD 匯率
 """
 import os, json
 from datetime import datetime
@@ -7,25 +8,22 @@ import yfinance as yf
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-def init_firebase():
-    sa_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
-    firebase_admin.initialize_app(
-        credentials.Certificate(sa_info),
-        { 'projectId': sa_info.get("project_id") }
-    )
-    return firestore.client()
+#──────── Firebase
+svc_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
+firebase_admin.initialize_app(
+    credentials.Certificate(svc_info),
+    { "projectId": svc_info["project_id"] }
+)
+db = firestore.client()
 
-def populate_exchange_rates(db):
-    symbol = "TWD=X"
-    hist = yf.Ticker(symbol).history(start="2000-01-01", interval="1d")['Close']
-    rates = { d.strftime("%Y-%m-%d"): float(v) for d, v in hist.items() }
-    db.collection("exchange_rates").document(symbol).set({
-        "rates": rates,
-        "lastUpdated": datetime.utcnow().isoformat(),
-        "dataSource": "yfinance-init"
-    })
-    print(f"已寫入 {len(rates)} 筆匯率資料")
+#──────── 匯率匯入
+sym = "TWD=X"
+hist = yf.Ticker(sym).history(start="2000-01-01", interval="1d")["Close"]
+rates = { d.strftime("%Y-%m-%d"): float(v) for d, v in hist.items() }
 
-if __name__ == "__main__":
-    db = init_firebase()
-    populate_exchange_rates(db)
+db.collection("exchange_rates").document(sym).set({
+    "rates"      : rates,
+    "lastUpdated": datetime.utcnow().isoformat(),
+    "dataSource" : "yfinance-init"
+})
+print(f"✅ {sym} {len(rates)} records imported")
