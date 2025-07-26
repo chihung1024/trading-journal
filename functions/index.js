@@ -1,58 +1,68 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const yahooFinance = require("yahoo-finance2").default; // For emergency fetches
+const yahooFinance = require("yahoo-finance2").default;
 
 admin.initializeApp();
 const db = admin.firestore();
 
-// Main Cloud Function
+// Main Cloud Function with enhanced logging
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
         const { userId } = context.params;
-        console.log(`--- Recalculation triggered for user: ${userId} ---`);
+        const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
+        const logger = new Logger(logRef);
 
-        const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
-        const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
+        try {
+            await logger.log("--- Recalculation triggered ---");
 
-        const transactionsSnapshot = await db.collection(`users/${userId}/transactions`).get();
-        const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
+            const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
 
-        if (transactions.length === 0) {
-            console.log(`No transactions found for user ${userId}. Clearing all portfolio data.`);
+            const transactionsSnapshot = await db.collection(`users/${userId}/transactions`).get();
+            const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+            if (transactions.length === 0) {
+                await logger.log("No transactions found. Clearing all portfolio data.");
+                await Promise.all([
+                    holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                    historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+                ]);
+                await logger.log("--- Clearing data finished ---");
+                return null;
+            }
+
+            const marketData = await getMarketDataFromDb(transactions, logger);
+
+            await logger.log("Starting FIFO calculation...");
+            const { holdings, totalRealizedPL, portfolioHistory } = calculatePortfolioFIFO(transactions, marketData);
+            await logger.log(`FIFO calculation complete. Found ${Object.keys(holdings).length} holdings. Total Realized P/L: ${totalRealizedPL}`);
+
+            await logger.log("Saving calculated data to Firestore...");
             await Promise.all([
-                holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-                historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+                holdingsDocRef.set({
+                    holdings: holdings,
+                    totalRealizedPL: totalRealizedPL,
+                    lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                }),
+                historyDocRef.set({
+                    history: portfolioHistory,
+                    lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                })
             ]);
-            return null;
+            await logger.log("--- Recalculation finished successfully! ---");
+
+        } catch (error) {
+            console.error("CRITICAL ERROR in recalculateHoldings:", error);
+            await logger.log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
         }
-
-        const marketData = await getMarketDataFromDb(transactions);
-
-        // CORE LOGIC: Switched to FIFO-based calculation
-        const { holdings, totalRealizedPL, portfolioHistory } = calculatePortfolioFIFO(transactions, marketData);
-
-        console.log(`Saving calculated data for user ${userId}. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}`);
-        await Promise.all([
-            holdingsDocRef.set({
-                holdings: holdings,
-                totalRealizedPL: totalRealizedPL,
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-            }),
-            historyDocRef.set({
-                history: portfolioHistory,
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-            })
-        ]);
-
-        console.log(`--- Recalculation finished for user: ${userId} ---`);
         return null;
     });
 
-// --- Data Fetching (Remains the same) ---
-async function getMarketDataFromDb(transactions) {
-    // This function, with its emergency fetch logic, is unchanged.
+// --- Data Fetching with enhanced logging ---
+async function getMarketDataFromDb(transactions, logger) {
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
+    await logger.log(`Required symbols: [${symbols.join(', ')}, TWD=X]`);
     const marketData = {};
     const symbolsToFetch = [];
 
@@ -61,7 +71,6 @@ async function getMarketDataFromDb(transactions) {
             if (doc.exists) {
                 marketData[symbol] = doc.data();
             } else {
-                console.log(`Data for symbol '${symbol}' not found in Firestore. Queuing for emergency fetch.`);
                 symbolsToFetch.push(symbol);
             }
         })
@@ -71,17 +80,17 @@ async function getMarketDataFromDb(transactions) {
             if (doc.exists) {
                 marketData["TWD=X"] = doc.data();
             } else {
-                console.log(`Exchange rate data 'TWD=X' not found. Queuing for emergency fetch.`);
                 symbolsToFetch.push("TWD=X");
             }
         })
     );
 
     await Promise.all(promises);
+    await logger.log(`Found ${Object.keys(marketData).length} symbols in Firestore. Missing ${symbolsToFetch.length} symbols.`);
 
     if (symbolsToFetch.length > 0) {
-        console.log(`Performing emergency fetch for ${symbolsToFetch.length} symbols: ${symbolsToFetch.join(', ')}`);
-        const fetchPromises = symbolsToFetch.map(symbol => fetchAndSaveMarketData(symbol));
+        await logger.log(`Performing emergency fetch for: [${symbolsToFetch.join(', ')}]`);
+        const fetchPromises = symbolsToFetch.map(symbol => fetchAndSaveMarketData(symbol, logger));
         const fetchedData = await Promise.all(fetchPromises);
         
         fetchedData.forEach((data, index) => {
@@ -92,20 +101,20 @@ async function getMarketDataFromDb(transactions) {
         });
     }
 
-    console.log(`Successfully prepared market data for ${Object.keys(marketData).length} symbols.`);
+    await logger.log(`Market data preparation complete.`);
     return marketData;
 }
 
-async function fetchAndSaveMarketData(symbol) {
-    // This emergency fetch function is also unchanged.
+async function fetchAndSaveMarketData(symbol, logger) {
     try {
         const isForex = symbol === "TWD=X";
         const collectionName = isForex ? "exchange_rates" : "price_history";
         const docRef = db.collection(collectionName).doc(symbol);
 
-        console.log(`Fetching full history for ${symbol} from Yahoo Finance...`);
+        await logger.log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
         const queryOptions = { period1: '2000-01-01', events: 'split,div' };
         const results = await yahooFinance.historical(symbol, queryOptions);
+        await logger.log(`[Fetch] Received data for ${symbol}. Shaping payload...`);
 
         const prices = {};
         results.forEach(item => {
@@ -135,22 +144,39 @@ async function fetchAndSaveMarketData(symbol) {
         }
 
         await docRef.set(payload);
-        console.log(`Successfully fetched and saved emergency data for ${symbol} to Firestore.`);
+        await logger.log(`[Fetch] Successfully saved emergency data for ${symbol} to Firestore.`);
         return payload;
 
     } catch (error) {
         console.error(`ERROR during emergency fetch for ${symbol}:`, error);
+        await logger.log(`[Fetch] ERROR for ${symbol}: ${error.message}`);
         return null;
     }
 }
 
+// --- Logger Class ---
+class Logger {
+    constructor(docRef) {
+        this.docRef = docRef;
+        this.logs = [];
+    }
 
-// --- NEW FIFO Calculation Engine ---
+    async log(message) {
+        const timestamp = new Date().toISOString();
+        const logEntry = `${timestamp}: ${message}`;
+        console.log(logEntry); // Also log to standard console
+        this.logs.push(logEntry);
+        // Write logs to Firestore incrementally
+        await this.docRef.set({ entries: this.logs }, { merge: true });
+    }
+}
+
+// --- FIFO Calculation Engine (Unchanged) ---
 function calculatePortfolioFIFO(transactions, marketData) {
+    // This entire function remains the same as the previous version.
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
-    // 1. Populate the event timeline (same as before)
     for (const t of transactions) {
         events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' });
     }
@@ -165,8 +191,7 @@ function calculatePortfolioFIFO(transactions, marketData) {
     }
     events.sort((a, b) => a.date - b.date);
 
-    // 2. Process the timeline with FIFO logic
-    const portfolio = {}; // Tracks state of each holding using lots
+    const portfolio = {};
     let totalRealizedPL = 0;
     const portfolioHistory = {};
     let lastProcessedDate = null;
@@ -175,7 +200,6 @@ function calculatePortfolioFIFO(transactions, marketData) {
         const eventDate = event.date;
         const eventDateStr = eventDate.toISOString().split('T')[0];
 
-        // Daily snapshot generation (logic remains the same)
         if (lastProcessedDate) {
             let currentDate = new Date(lastProcessedDate);
             currentDate.setDate(currentDate.getDate() + 1);
@@ -188,7 +212,6 @@ function calculatePortfolioFIFO(transactions, marketData) {
 
         const symbol = event.symbol.toUpperCase();
         if (!portfolio[symbol]) {
-            // Initialize with the new FIFO structure
             portfolio[symbol] = { lots: [], currency: 'USD' };
         }
 
@@ -215,12 +238,10 @@ function calculatePortfolioFIFO(transactions, marketData) {
                     while (sharesToSell > 0 && portfolio[symbol].lots.length > 0) {
                         const firstLot = portfolio[symbol].lots[0];
                         if (firstLot.quantity <= sharesToSell) {
-                            // Sell the entire first lot
                             costOfSoldSharesTWD += firstLot.quantity * firstLot.pricePerShareTWD;
                             sharesToSell -= firstLot.quantity;
-                            portfolio[symbol].lots.shift(); // Remove the first lot
+                            portfolio[symbol].lots.shift();
                         } else {
-                            // Sell a partial amount from the first lot
                             costOfSoldSharesTWD += sharesToSell * firstLot.pricePerShareTWD;
                             firstLot.quantity -= sharesToSell;
                             sharesToSell = 0;
@@ -231,7 +252,6 @@ function calculatePortfolioFIFO(transactions, marketData) {
                 break;
 
             case 'split':
-                // Apply split to each lot
                 portfolio[symbol].lots.forEach(lot => {
                     lot.quantity *= event.ratio;
                     lot.pricePerShareTWD /= event.ratio;
@@ -239,7 +259,6 @@ function calculatePortfolioFIFO(transactions, marketData) {
                 break;
 
             case 'dividend':
-                // Dividend logic remains the same for now
                 const totalShares = portfolio[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
                 const dividendTWD = event.amount * totalShares * (portfolio[symbol].currency === 'USD' ? rateOnDate : 1);
                 totalRealizedPL += dividendTWD;
@@ -250,7 +269,6 @@ function calculatePortfolioFIFO(transactions, marketData) {
         lastProcessedDate = eventDate;
     }
 
-    // Generate history from the last event to today (logic remains the same)
     if (lastProcessedDate) {
         let currentDate = new Date(lastProcessedDate);
         currentDate.setDate(currentDate.getDate() + 1);
@@ -262,7 +280,6 @@ function calculatePortfolioFIFO(transactions, marketData) {
         }
     }
 
-    // 4. Calculate final holdings details from the lots
     const finalHoldings = {};
     const today = new Date();
     const latestRate = findNearestDataPoint(marketData["TWD=X"]?.rates || {}, today);
@@ -296,7 +313,6 @@ function calculatePortfolioFIFO(transactions, marketData) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
-// Helper function to calculate daily market value based on lots
 function calculateDailyMarketValueFIFO(portfolio, marketData, date) {
     let totalValue = 0;
     const rateOnDate = findNearestDataPoint(marketData["TWD=X"]?.rates || {}, date);
@@ -314,7 +330,6 @@ function calculateDailyMarketValueFIFO(portfolio, marketData, date) {
     return totalValue;
 }
 
-// findNearestDataPoint function remains the same
 function findNearestDataPoint(history, targetDate) {
     if (!history || Object.keys(history).length === 0) return 1;
 
