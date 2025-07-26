@@ -59,11 +59,25 @@
       </tbody>
     </table>
 
-    <script src="/__/firebase/8.10.0/firebase-app.js"></script>
-    <script src="/__/firebase/8.10.0/firebase-firestore.js"></script>
-    <script src="/__/firebase/init.js"></script>
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-firestore.js"></script>
+
     <script>
+      // PASTE YOUR FIREBASE CONFIG HERE
+      const firebaseConfig = {
+        apiKey: "YOUR_API_KEY",
+        authDomain: "YOUR_AUTH_DOMAIN",
+        projectId: "YOUR_PROJECT_ID",
+        storageBucket: "YOUR_STORAGE_BUCKET",
+        messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+        appId: "YOUR_APP_ID"
+      };
+
+      // Initialize Firebase
+      firebase.initializeApp(firebaseConfig);
       const db = firebase.firestore();
+
       const currencySelect = document.getElementById('currency-select');
       let rates = {};
       let selectedCurrency = 'USD';
