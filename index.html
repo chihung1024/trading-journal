@@ -62,7 +62,10 @@
             <div class="card p-6 mb-8">
                 <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
                     <div class="sm:flex sm:items-center sm:space-x-4"><h2 class="text-xl font-bold text-gray-800">投資組合</h2><div class="mt-2 sm:mt-0 border-b sm:border-b-0 sm:border-l border-gray-200 sm:pl-4"><nav class="-mb-px flex space-x-6" id="tabs"><a href="#" data-tab="holdings" class="tab-item whitespace-nowrap border-b-2 font-medium text-sm border-indigo-500 text-indigo-600">持股一覽</a><a href="#" data-tab="transactions" class="tab-item whitespace-nowrap border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">交易紀錄</a></nav></div></div>
-                    <button id="add-transaction-btn" class="btn bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700 flex items-center space-x-2 w-full sm:w-auto justify-center"><i data-lucide="plus-circle" class="h-5 w-5"></i><span>新增交易</span></button>
+                    <div class="flex space-x-2">
+                        <button id="manage-splits-btn" class="btn bg-gray-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-gray-700 flex items-center space-x-2"><i data-lucide="git-merge" class="h-5 w-5"></i><span>管理拆股</span></button>
+                        <button id="add-transaction-btn" class="btn bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700 flex items-center space-x-2"><i data-lucide="plus-circle" class="h-5 w-5"></i><span>新增交易</span></button>
+                    </div>
                 </div>
                 <div id="holdings-tab" class="tab-content overflow-x-auto"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">持有股數(調整後)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">平均成本(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">總成本(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">現價(前復權)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">市值(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">未實現損益(TWD)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">報酬率</th></tr></thead><tbody id="holdings-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
                 <div id="transactions-tab" class="tab-content overflow-x-auto hidden"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">日期</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">類型</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">股數(調整後)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">價格(原)</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">匯率</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">總金額(TWD)</th><th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th></tr></thead><tbody id="transactions-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
@@ -74,6 +77,7 @@
 
         <!-- Modals -->
         <div id="transaction-modal" class="fixed inset-0 z-30 overflow-y-auto hidden"><div class="flex items-center justify-center min-h-screen"><div class="fixed inset-0 modal-backdrop" id="modal-backdrop-trans"></div><div class="bg-white rounded-lg shadow-xl p-8 z-40 w-full max-w-md mx-4"><h3 id="modal-title" class="text-2xl font-bold mb-6 text-gray-800">新增交易紀錄</h3><form id="transaction-form"><input type="hidden" id="transaction-id"><div class="mb-4"><label for="transaction-date" class="block text-sm font-medium text-gray-700 mb-1">日期</label><input type="date" id="transaction-date" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label for="stock-symbol" class="block text-sm font-medium text-gray-700 mb-1">股票代碼</label><input type="text" id="stock-symbol" placeholder="例如: AAPL, 2330.TW" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label class="block text-sm font-medium text-gray-700 mb-1">交易類型</label><div class="flex space-x-4"><label class="flex items-center"><input type="radio" name="transaction-type" value="buy" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500" checked><span class="ml-2 text-gray-700">買入</span></label><label class="flex items-center"><input type="radio" name="transaction-type" value="sell" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="ml-2 text-gray-700">賣出</span></label><label class="flex items-center"><input type="radio" name="transaction-type" value="dividend" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="ml-2 text-gray-700">股息</span></label></div></div><div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4"><div><label for="quantity" class="block text-sm font-medium text-gray-700 mb-1">股數</label><input type="number" step="any" id="quantity" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div><label for="price" class="block text-sm font-medium text-gray-700 mb-1">價格</label><input type="number" step="any" id="price" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div></div><div class="mb-6"><label for="currency" class="block text-sm font-medium text-gray-700 mb-1">幣別</label><select id="currency" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"><option value="TWD">TWD</option><option value="USD">USD</option></select></div><div class="flex justify-end space-x-4"><button type="button" id="cancel-btn" class="btn bg-gray-200 text-gray-700 font-bold py-2 px-4 rounded-lg hover:bg-gray-300">取消</button><button type="submit" class="btn bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-indigo-700">儲存</button></div></form></div></div>
+        <div id="split-modal" class="fixed inset-0 z-30 overflow-y-auto hidden"><div class="flex items-center justify-center min-h-screen"><div class="fixed inset-0 modal-backdrop" id="modal-backdrop-split"></div><div class="bg-white rounded-lg shadow-xl p-8 z-40 w-full max-w-2xl mx-4"><h3 class="text-2xl font-bold mb-6 text-gray-800">管理手動拆股紀錄</h3><div class="grid grid-cols-1 md:grid-cols-2 gap-8"><div class="border-r pr-8"> <h4 class="text-lg font-semibold mb-4">新增拆股紀錄</h4><form id="split-form"><div class="mb-4"><label for="split-symbol" class="block text-sm font-medium text-gray-700 mb-1">股票代碼</label><input type="text" id="split-symbol" placeholder="例如: 0050.TW" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label for="split-date" class="block text-sm font-medium text-gray-700 mb-1">拆股日期</label><input type="date" id="split-date" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label for="split-ratio" class="block text-sm font-medium text-gray-700 mb-1">拆股比例 (e.g., 1:2 填 2)</label><input type="number" step="any" id="split-ratio" placeholder="2" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><button type="submit" class="btn bg-blue-600 text-white font-bold py-2 px-4 rounded-lg w-full hover:bg-blue-700">新增紀錄</button></form></div><div><h4 class="text-lg font-semibold mb-4">已儲存的紀錄</h4><div id="manual-splits-list" class="overflow-y-auto max-h-60"><p class="text-gray-500">載入中...</p></div></div></div><div class="flex justify-end mt-8"><button type="button" id="close-split-modal-btn" class="btn bg-gray-200 text-gray-700 font-bold py-2 px-4 rounded-lg hover:bg-gray-300">關閉</button></div></div></div>
         <div id="confirm-modal" class="fixed inset-0 z-50 overflow-y-auto hidden"><div class="flex items-center justify-center min-h-screen"><div class="fixed inset-0 modal-backdrop"></div><div class="bg-white rounded-lg shadow-xl p-8 z-50 w-full max-w-sm mx-4"><h3 id="confirm-title" class="text-lg font-semibold mb-4 text-gray-800">確認操作</h3><p id="confirm-message" class="text-gray-600 mb-6">您確定要執行此操作嗎？</p><div class="flex justify-end space-x-4"><button id="confirm-cancel-btn" class="btn bg-gray-200 text-gray-700 font-bold py-2 px-4 rounded-lg hover:bg-gray-300">取消</button><button id="confirm-ok-btn" class="btn bg-red-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:bg-red-700">確定</button></div></div></div>
     </div>
 
@@ -91,19 +95,14 @@
             appId: "1:50863752247:web:766eaa892d2c8d28bb6bb2"
         };
 
-        let db, auth;
-        let transactions = [];
-        let holdings = {};
+        let db, auth, userId;
+        let transactions = [], holdings = {}, manualSplits = [];
         let chart;
-        let userId;
         let realizedPLFromSoldOff = 0;
         
-        let transactionsUnsubscribe = null;
-        let historyUnsubscribe = null;
-        let holdingsUnsubscribe = null;
+        let transactionsUnsubscribe, holdingsUnsubscribe, historyUnsubscribe, manualSplitsUnsubscribe;
         let confirmCallback = null;
-
-        let dataLoaded = { transactions: false, holdings: false };
+        let dataLoaded = { transactions: false, holdings: false, splits: false };
 
         // --- 輔助函式 ---
         function formatCurrency(value, decimals = 2) { const num = Number(value); if (isNaN(num)) return '0.00'; return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }); }
@@ -160,30 +159,17 @@
         }
 
         document.addEventListener('DOMContentLoaded', () => {
-            initialize();
+            const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+            auth = getAuth(app);
+            db = getFirestore(app);
+            setupEventListeners();
+            initializeChart();
+            lucide.createIcons();
+            handleAuthentication();
         });
 
-        async function initialize() {
-            if (firebaseConfig.projectId === "YOUR_PROJECT_ID") {
-                showLoadingError("設定錯誤！", "請在 index.html 中設定您的 Firebase 專案設定。");
-                return;
-            }
-            try {
-                const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-                auth = getAuth(app);
-                db = getFirestore(app);
-                setupEventListeners();
-                initializeChart();
-                lucide.createIcons();
-                handleAuthentication();
-            } catch (error) {
-                console.error("Firebase 初始化失敗:", error);
-                showLoadingError("Firebase 初始化失敗！", "請檢查 firebaseConfig 是否正確。");
-            }
-        }
-
         function handleAuthentication() {
-            onAuthStateChanged(auth, async (user) => {
+            onAuthStateChanged(auth, user => {
                 if (user) {
                     userId = user.uid;
                     document.getElementById('auth-status').textContent = '已連線';
@@ -191,16 +177,14 @@
                     setupDataListeners();
                 } else {
                     document.getElementById('auth-status').textContent = '嘗試匿名登入...';
-                    try {
-                        await signInAnonymously(auth);
-                    } catch (error) {
+                    signInAnonymously(auth).catch(error => {
                         console.error("匿名登入失敗:", error);
-                        if (error.code === 'auth/operation-not-allowed' || error.code === 'auth/configuration-not-found') {
-                            showLoadingError("登入設定錯誤！", "請前往您的 Firebase 專案，點擊左側選單的「Authentication」，進入「Sign-in method」分頁，然後啟用「匿名 (Anonymous)」登入方式。儲存後請重新整理此頁面。", "https://console.firebase.google.com/");
+                        if (error.code === 'auth/operation-not-allowed') {
+                            showLoadingError("登入設定錯誤！", "請前往您的 Firebase 專案，啟用匿名登入方式。", "https://console.firebase.google.com/");
                         } else {
                             showLoadingError("登入失敗！", "請檢查網路連線或 Firebase 設定。");
                         }
-                    }
+                    });
                 }
             });
         }
@@ -210,33 +194,35 @@
             document.getElementById('cancel-btn').addEventListener('click', closeModal);
             document.getElementById('modal-backdrop-trans').addEventListener('click', closeModal);
             document.getElementById('transaction-form').addEventListener('submit', handleFormSubmit);
-            document.getElementById('tabs').addEventListener('click', (e) => { e.preventDefault(); if (e.target.matches('.tab-item')) { switchTab(e.target.dataset.tab); } });
+            
+            document.getElementById('manage-splits-btn').addEventListener('click', openSplitModal);
+            document.getElementById('close-split-modal-btn').addEventListener('click', closeSplitModal);
+            document.getElementById('modal-backdrop-split').addEventListener('click', closeSplitModal);
+            document.getElementById('split-form').addEventListener('submit', handleSplitFormSubmit);
+
+            document.getElementById('tabs').addEventListener('click', e => { e.preventDefault(); if (e.target.matches('.tab-item')) switchTab(e.target.dataset.tab); });
             document.getElementById('confirm-cancel-btn').addEventListener('click', hideConfirm);
-            document.getElementById('confirm-ok-btn').addEventListener('click', () => { if (confirmCallback) { confirmCallback(); } hideConfirm(); });
+            document.getElementById('confirm-ok-btn').addEventListener('click', () => { if (confirmCallback) confirmCallback(); hideConfirm(); });
         }
 
         function setupDataListeners() {
             if (transactionsUnsubscribe) transactionsUnsubscribe();
-            if (historyUnsubscribe) historyUnsubscribe();
             if (holdingsUnsubscribe) holdingsUnsubscribe();
+            if (historyUnsubscribe) historyUnsubscribe();
+            if (manualSplitsUnsubscribe) manualSplitsUnsubscribe();
 
-            const transactionsCol = collection(db, 'users', userId, 'transactions');
-            const q = query(transactionsCol, orderBy("date", "desc"));
-            transactionsUnsubscribe = onSnapshot(q, (snapshot) => {
-                transactions = snapshot.docs.map(doc => {
-                    const data = doc.data();
-                    const date = data.date.toDate ? data.date.toDate().toISOString().split('T')[0] : data.date;
-                    return { id: doc.id, ...data, date };
-                });
+            const commonErrorHandler = (name) => (error) => {
+                console.error(`讀取 ${name} 失敗:`, error);
+                showNotification('error', `讀取 ${name} 失敗，請檢查 Firestore 安全規則。`);
+            };
+
+            transactionsUnsubscribe = onSnapshot(query(collection(db, 'users', userId, 'transactions'), orderBy("date", "desc")), snapshot => {
+                transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), date: doc.data().date.toDate().toISOString().split('T')[0] }));
                 dataLoaded.transactions = true;
                 renderAll();
-            }, (error) => {
-                console.error("讀取交易紀錄失敗:", error);
-                showLoadingError("讀取交易紀錄失敗！", "請檢查您的網路連線與 Firestore 安全規則。");
-            });
+            }, commonErrorHandler('交易紀錄'));
             
-            const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
-            holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
+            holdingsUnsubscribe = onSnapshot(doc(db, 'users', userId, 'user_data', 'current_holdings'), docSnap => {
                 if (docSnap.exists()) {
                     const data = docSnap.data();
                     holdings = data.holdings || {};
@@ -247,27 +233,21 @@
                 }
                 dataLoaded.holdings = true;
                 renderAll();
-            }, (error) => {
-                console.error("讀取持股資料失敗:", error);
-                showNotification('error', '讀取持股資料失敗，請確認後端腳本是否已執行。');
-            });
+            }, commonErrorHandler('持股資料'));
 
-            const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
-            historyUnsubscribe = onSnapshot(historyDocRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    const portfolioHistory = docSnap.data().history;
-                    updateAssetChart(portfolioHistory);
-                }
-            }, (error) => {
-                 console.error("讀取資產歷史失敗:", error);
-                 showNotification('error', '讀取資產圖表資料失敗。');
-            });
+            historyUnsubscribe = onSnapshot(doc(db, 'users', userId, 'user_data', 'portfolio_history'), docSnap => {
+                if (docSnap.exists()) updateAssetChart(docSnap.data().history);
+            }, commonErrorHandler('資產歷史'));
+
+            manualSplitsUnsubscribe = onSnapshot(query(collection(db, 'users', userId, 'manual_splits'), orderBy("date", "desc")), snapshot => {
+                manualSplits = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), date: doc.data().date.toDate().toISOString().split('T')[0] }));
+                dataLoaded.splits = true;
+                renderManualSplitsList();
+            }, commonErrorHandler('手動拆股紀錄'));
         }
 
         function renderAll() {
-            if (!dataLoaded.transactions || !dataLoaded.holdings) {
-                return;
-            }
+            if (!dataLoaded.transactions || !dataLoaded.holdings || !dataLoaded.splits) return;
             
             renderHoldingsTable();
             renderTransactionsTable();
@@ -284,19 +264,17 @@
             const tableBody = document.getElementById('holdings-table-body');
             tableBody.innerHTML = '';
             const holdingsArray = Object.values(holdings);
-
             if (holdingsArray.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有持股紀錄，請新增一筆交易。</td></tr>`;
+                tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有持股紀錄。</td></tr>`;
                 return;
             }
-
             holdingsArray.sort((a,b) => b.marketValueTWD - a.marketValueTWD).forEach(h => {
                 const row = document.createElement('tr');
                 row.className = "hover:bg-gray-50";
                 row.innerHTML = `
                     <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${h.symbol}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${(h.quantity || 0).toFixed(2)}</td>
-                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.avgCostTWD)} <span class="text-xs text-gray-500">TWD</span></td>
+                    <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.avgCostTWD)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.totalCostTWD, 0)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.currentPrice)} <span class="text-xs text-gray-500">${h.currency}</span></td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatCurrency(h.marketValueTWD, 0)}</td>
@@ -314,13 +292,11 @@
                 tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有交易紀錄。</td></tr>`;
                 return;
             }
-
-            for (const t of transactions) {
+            transactions.forEach(t => {
                 const row = document.createElement('tr');
                 row.className = "hover:bg-gray-50";
                 const typeText = { buy: '買入', sell: '賣出', dividend: '股息' };
                 const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' };
-                
                 const exchangeRateText = t.currency === 'USD' ? (t.exchangeRate ? t.exchangeRate.toFixed(4) : 'N/A') : '---';
                 const totalValueText = t.totalValueTWD ? formatCurrency(t.totalValueTWD, 0) : 'N/A';
                 const adjustedQuantityText = t.adjustedQuantity ? t.adjustedQuantity.toFixed(2) : 'N/A';
@@ -339,7 +315,7 @@
                         <button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900">刪除</button>
                     </td>`;
                 tableBody.appendChild(row);
-            };
+            });
             document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', handleEdit));
             document.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', handleDelete));
         }
@@ -350,60 +326,35 @@
             const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
             const totalRealizedPL = holdingsArray.reduce((sum, h) => sum + h.realizedPLTWD, 0) + realizedPLFromSoldOff;
             const totalCost = holdingsArray.reduce((sum, h) => sum + h.totalCostTWD, 0);
-
-            const totalReturnOnInvestment = totalCost > 0 ? ((totalUnrealizedPL + totalRealizedPL) / totalCost) * 100 : 0;
+            const totalReturn = totalCost > 0 ? ((totalUnrealizedPL + totalRealizedPL) / totalCost) * 100 : 0;
             
             document.getElementById('total-assets').textContent = formatCurrency(totalMarketValue, 0);
-            
-            const unrealizedEl = document.getElementById('unrealized-pl');
-            unrealizedEl.textContent = formatCurrency(totalUnrealizedPL, 0);
-            unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
-            
-            const realizedEl = document.getElementById('realized-pl');
-            realizedEl.textContent = formatCurrency(totalRealizedPL, 0);
-            realizedEl.className = `text-3xl font-bold mt-2 ${totalRealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
+            document.getElementById('unrealized-pl').textContent = formatCurrency(totalUnrealizedPL, 0);
+            document.getElementById('realized-pl').textContent = formatCurrency(totalRealizedPL, 0);
+            document.getElementById('total-return').textContent = `${totalReturn.toFixed(2)}%`;
 
-            const totalReturnEl = document.getElementById('total-return');
-            totalReturnEl.textContent = `${totalReturnOnInvestment.toFixed(2)}%`;
-            totalReturnEl.className = `text-3xl font-bold mt-2 ${totalReturnOnInvestment >= 0 ? 'text-red-600' : 'text-green-600'}`;
-
-            const cashflows = [];
-            for(const t of transactions) {
-                if (t.totalValueTWD) {
-                    const amount = t.totalValueTWD;
-                    const date = new Date(t.date);
-                    if (t.type === 'buy') { cashflows.push({ date: date, amount: -amount }); } 
-                    else { cashflows.push({ date: date, amount: amount }); }
-                }
-            }
-            if (totalMarketValue > 0) { cashflows.push({ date: new Date(), amount: totalMarketValue }); }
+            const cashflows = transactions.filter(t => t.totalValueTWD).map(t => ({ date: new Date(t.date), amount: t.type === 'buy' ? -t.totalValueTWD : t.totalValueTWD }));
+            if (totalMarketValue > 0) cashflows.push({ date: new Date(), amount: totalMarketValue });
             const xirrValue = cashflows.length > 1 ? calculateXIRR(cashflows) * 100 : 0;
-            const xirrEl = document.getElementById('xirr-value');
-            xirrEl.textContent = isFinite(xirrValue) ? `${xirrValue.toFixed(2)}%` : 'N/A';
-            xirrEl.className = `text-3xl font-bold mt-2 ${xirrValue >= 0 ? 'text-red-600' : 'text-green-600'}`;
+            document.getElementById('xirr-value').textContent = isFinite(xirrValue) ? `${xirrValue.toFixed(2)}%` : 'N/A';
         }
         
         function initializeChart() {
-            const options = { chart: { type: 'area', height: 350, zoom: { enabled: true }, toolbar: { show: true } }, series: [{ name: '總資產', data: [] }], xaxis: { type: 'datetime', labels: { datetimeUTC: false, format: 'yy/MM/dd' } }, yaxis: { labels: { formatter: (value) => { return formatCurrency(value, 0) } } }, dataLabels: { enabled: false }, stroke: { curve: 'smooth', width: 2 }, fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.7, opacityTo: 0.3, stops: [0, 90, 100] } }, tooltip: { x: { format: 'yyyy/MM/dd' }, y: { formatter: (value) => { return formatCurrency(value) } } }, colors: ['#4f46e5'] };
+            const options = { chart: { type: 'area', height: 350 }, series: [{ name: '總資產', data: [] }], xaxis: { type: 'datetime' }, yaxis: { labels: { formatter: val => formatCurrency(val, 0) } } };
             chart = new ApexCharts(document.querySelector("#asset-chart"), options);
             chart.render();
         }
 
         function updateAssetChart(portfolioHistory) {
-            if (!portfolioHistory || Object.keys(portfolioHistory).length === 0) {
-                chart.updateSeries([{ data: [] }]);
-                return;
-            }
-            const chartData = Object.entries(portfolioHistory)
-                .sort((a, b) => new Date(a[0]) - new Date(b[0]))
-                .map(([date, value]) => [new Date(date).getTime(), value]);
+            if (!portfolioHistory) return;
+            const chartData = Object.entries(portfolioHistory).map(([date, value]) => [new Date(date).getTime(), value]);
             chart.updateSeries([{ data: chartData }]);
         }
 
         async function handleFormSubmit(e) {
             e.preventDefault();
             const id = document.getElementById('transaction-id').value;
-            const transactionData = { 
+            const data = { 
                 date: new Date(document.getElementById('transaction-date').value),
                 symbol: document.getElementById('stock-symbol').value.toUpperCase().trim(), 
                 type: document.querySelector('input[name="transaction-type"]:checked').value, 
@@ -411,76 +362,107 @@
                 price: parseFloat(document.getElementById('price').value), 
                 currency: document.getElementById('currency').value 
             };
-            if (!transactionData.symbol || isNaN(transactionData.quantity) || isNaN(transactionData.price)) { showNotification('error', '請填寫所有欄位。'); return; }
-
-            const txCol = collection(db, 'users', userId, 'transactions');
+            if (!data.symbol || isNaN(data.quantity) || isNaN(data.price)) return showNotification('error', '請填寫所有欄位。');
 
             try {
-                if (id) {
-                    await updateDoc(doc(txCol, id), transactionData);
-                } else {
-                    await addDoc(txCol, transactionData);
-                }
+                const col = collection(db, 'users', userId, 'transactions');
+                if (id) await updateDoc(doc(col, id), data); else await addDoc(col, data);
                 closeModal();
-                showNotification('success', id ? '交易已更新！' : '交易已新增！');
-            } catch (error) {
-                console.error("儲存交易失敗:", error);
-                showNotification('error', "儲存失敗，請稍後再試。");
-            }
+                showNotification('success', `交易已${id ? '更新' : '新增'}！後端正在重新計算...`);
+            } catch (error) { showNotification('error', "儲存失敗: " + error.message); }
         }
         
         async function handleDelete(e) {
             const id = e.target.dataset.id;
             showConfirm('確定要刪除這筆交易紀錄嗎？', async () => {
                 try {
-                    const txCol = collection(db, 'users', userId, 'transactions');
-                    await deleteDoc(doc(txCol, id));
+                    await deleteDoc(doc(db, 'users', userId, 'transactions', id));
                     showNotification('success', '交易紀錄已刪除。');
-                } catch (error) {
-                    console.error("刪除失敗:", error);
-                    showNotification('error', "刪除失敗，請稍後再試。");
-                }
+                } catch (error) { showNotification('error', "刪除失敗: " + error.message); }
             });
         }
         
         function handleEdit(e) { 
-            const id = e.target.dataset.id; 
-            const transaction = transactions.find(t => t.id === id); 
-            if (transaction) { 
-                openModal(true, transaction); 
-            } 
+            const transaction = transactions.find(t => t.id === e.target.dataset.id); 
+            if (transaction) openModal(true, transaction); 
         }
         
-        function openModal(isEdit = false, transaction = null) {
-            const form = document.getElementById('transaction-form'); 
-            form.reset(); 
+        function openModal(isEdit = false, data = null) {
+            const form = document.getElementById('transaction-form');
+            form.reset();
             document.getElementById('transaction-id').value = '';
-            
-            if (isEdit && transaction) {
-                document.getElementById('modal-title').textContent = '編輯交易紀錄'; 
-                document.getElementById('transaction-id').value = transaction.id; 
-                document.getElementById('transaction-date').value = transaction.date; 
-                document.getElementById('stock-symbol').value = transaction.symbol; 
-                document.querySelector(`input[name="transaction-type"][value="${transaction.type}"]`).checked = true; 
-                document.getElementById('quantity').value = transaction.quantity; 
-                document.getElementById('price').value = transaction.price; 
-                document.getElementById('currency').value = transaction.currency || 'USD';
+            if (isEdit && data) {
+                document.getElementById('modal-title').textContent = '編輯交易紀錄';
+                Object.keys(data).forEach(key => {
+                    const el = form.elements[key];
+                    if (el) {
+                        if (el.type === 'radio') el.checked = el.value === data[key];
+                        else el.value = data[key];
+                    }
+                });
+                document.getElementById('transaction-id').value = data.id;
             } else {
-                document.getElementById('modal-title').textContent = '新增交易紀錄'; 
-                document.getElementById('transaction-date').value = new Date().toISOString().split('T')[0];
-                document.getElementById('currency').value = 'USD';
+                document.getElementById('modal-title').textContent = '新增交易紀錄';
+                form.elements.date.value = new Date().toISOString().split('T')[0];
+                form.elements.currency.value = 'USD';
             }
             document.getElementById('transaction-modal').classList.remove('hidden');
         }
+        function closeModal() { document.getElementById('transaction-modal').classList.add('hidden'); }
 
-        function closeModal() { 
-            document.getElementById('transaction-modal').classList.add('hidden'); 
+        // --- Split Modal Functions ---
+        function openSplitModal() { document.getElementById('split-modal').classList.remove('hidden'); }
+        function closeSplitModal() { document.getElementById('split-modal').classList.add('hidden'); }
+        
+        async function handleSplitFormSubmit(e) {
+            e.preventDefault();
+            const data = {
+                symbol: document.getElementById('split-symbol').value.toUpperCase().trim(),
+                date: new Date(document.getElementById('split-date').value),
+                ratio: parseFloat(document.getElementById('split-ratio').value)
+            };
+            if (!data.symbol || !data.date || isNaN(data.ratio)) return showNotification('error', '請填寫所有欄位。');
+
+            try {
+                await addDoc(collection(db, 'users', userId, 'manual_splits'), data);
+                showNotification('success', '手動拆股紀錄已新增！後端正在重新計算...');
+                document.getElementById('split-form').reset();
+            } catch (error) { showNotification('error', "新增失敗: " + error.message); }
         }
 
-        function hideConfirm() { 
-            confirmCallback = null; 
-            document.getElementById('confirm-modal').classList.add('hidden'); 
+        function renderManualSplitsList() {
+            const listEl = document.getElementById('manual-splits-list');
+            listEl.innerHTML = '';
+            if (manualSplits.length === 0) {
+                listEl.innerHTML = `<p class="text-gray-500">沒有手動拆股紀錄。</p>`;
+                return;
+            }
+            manualSplits.forEach(split => {
+                const item = document.createElement('div');
+                item.className = 'flex justify-between items-center p-2 border-b';
+                item.innerHTML = `
+                    <div>
+                        <p class="font-semibold">${split.symbol}</p>
+                        <p class="text-sm text-gray-600">${split.date} (1:${split.ratio})</p>
+                    </div>
+                    <button data-id="${split.id}" class="delete-split-btn text-red-500 hover:text-red-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                `;
+                listEl.appendChild(item);
+            });
+            document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit));
+            lucide.createIcons({ context: listEl });
         }
+
+        async function handleDeleteSplit(e) {
+            const id = e.currentTarget.dataset.id;
+            showConfirm('確定要刪除這筆手動拆股紀錄嗎？', async () => {
+                try {
+                    await deleteDoc(doc(db, 'users', userId, 'manual_splits', id));
+                    showNotification('success', '手動拆股紀錄已刪除。');
+                } catch (error) { showNotification('error', "刪除失敗: " + error.message); }
+            });
+        }
+
     </script>
 </body>
 </html>
