@@ -22,6 +22,11 @@
   <body>
     <h1>Stock Portfolio</h1>
     
+    <div>
+      <label for="currency-select">Display Currency:</label>
+      <select id="currency-select"></select>
+    </div>
+
     <h2>Holdings</h2>
     <table id="holdings-table">
       <thead>
@@ -59,66 +64,96 @@
     <script src="/__/firebase/init.js"></script>
     <script>
       const db = firebase.firestore();
+      const currencySelect = document.getElementById('currency-select');
+      let rates = {};
+      let selectedCurrency = 'USD';
 
-      // Holdings Table
-      const holdingsTable = document.querySelector('#holdings-table tbody');
-      db.collection('transactions').onSnapshot(snapshot => {
-        const holdings = {};
-        snapshot.forEach(doc => {
-          const transaction = doc.data();
-          const stockId = transaction.stock_id;
-          if (!holdings[stockId]) {
-            holdings[stockId] = {
-              shares: 0,
-              cost: 0
-            };
-          }
-          if (transaction.type === 'buy') {
-            holdings[stockId].shares += transaction.shares_adjusted;
-            holdings[stockId].cost += transaction.price_original * transaction.shares_original;
-          } else if (transaction.type === 'sell') {
-            holdings[stockId].shares -= transaction.shares_adjusted;
-            holdings[stockId].cost -= transaction.price_original * transaction.shares_original;
+      function formatCurrency(amount) {
+        return new Intl.NumberFormat('en-US', { style: 'currency', currency: selectedCurrency }).format(amount);
+      }
+
+      function render() {
+        renderHoldings();
+        renderTransactions();
+      }
+
+      db.collection('rates').doc('latest').onSnapshot(doc => {
+        rates = doc.data();
+        currencySelect.innerHTML = Object.keys(rates).sort().map(currency => `<option value="${currency}">${currency}</option>`).join('');
+        currencySelect.value = selectedCurrency;
+        render();
+      });
+
+      currencySelect.addEventListener('change', (e) => {
+        selectedCurrency = e.target.value;
+        render();
+      });
+
+      function renderHoldings() {
+        const holdingsTable = document.querySelector('#holdings-table tbody');
+        db.collection('transactions').onSnapshot(snapshot => {
+          const holdings = {};
+          snapshot.forEach(doc => {
+            const transaction = doc.data();
+            const stockId = transaction.stock_id;
+            if (!holdings[stockId]) {
+              holdings[stockId] = {
+                shares: 0,
+                cost: 0
+              };
+            }
+            if (transaction.type === 'buy') {
+              holdings[stockId].shares += transaction.shares_adjusted;
+              holdings[stockId].cost += transaction.price_original * transaction.shares_original;
+            } else if (transaction.type === 'sell') {
+              holdings[stockId].shares -= transaction.shares_adjusted;
+              holdings[stockId].cost -= transaction.price_original * transaction.shares_original;
+            }
+          });
+
+          holdingsTable.innerHTML = '';
+          for (const stockId in holdings) {
+            const holding = holdings[stockId];
+            db.collection('stocks').doc(stockId).get().then(stockDoc => {
+              const stock = stockDoc.data();
+              const rate = rates[selectedCurrency] / rates[stock.currency];
+              const marketValue = holding.shares * stock.price * rate;
+              const costBasis = holding.cost * rate;
+              const gainLoss = marketValue - costBasis;
+              const row = holdingsTable.insertRow();
+              row.innerHTML = `
+                <td>${stockId}</td>
+                <td>${holding.shares.toFixed(2)}</td>
+                <td>${formatCurrency(stock.price * rate)}</td>
+                <td>${formatCurrency(marketValue)}</td>
+                <td>${formatCurrency(costBasis)}</td>
+                <td>${formatCurrency(gainLoss)}</td>
+              `;
+            });
           }
         });
+      }
 
-        holdingsTable.innerHTML = '';
-        for (const stockId in holdings) {
-          const holding = holdings[stockId];
-          db.collection('stocks').doc(stockId).get().then(stockDoc => {
-            const stock = stockDoc.data();
-            const marketValue = holding.shares * stock.price;
-            const gainLoss = marketValue - holding.cost;
-            const row = holdingsTable.insertRow();
+      function renderTransactions() {
+        const transactionsTable = document.querySelector('#transactions-table tbody');
+        db.collection('transactions').orderBy('date', 'desc').onSnapshot(snapshot => {
+          transactionsTable.innerHTML = '';
+          snapshot.forEach(doc => {
+            const transaction = doc.data();
+            const rate = rates[selectedCurrency] / rates[transaction.currency_original];
+            const total = transaction.shares_original * transaction.price_original * rate;
+            const row = transactionsTable.insertRow();
             row.innerHTML = `
-              <td>${stockId}</td>
-              <td>${holding.shares.toFixed(2)}</td>
-              <td>${stock.price.toFixed(2)}</td>
-              <td>${marketValue.toFixed(2)}</td>
-              <td>${holding.cost.toFixed(2)}</td>
-              <td>${gainLoss.toFixed(2)}</td>
+              <td>${transaction.date}</td>
+              <td>${transaction.stock_id}</td>
+              <td>${transaction.type}</td>
+              <td>${transaction.shares_original}</td>
+              <td>${formatCurrency(transaction.price_original * rate)}</td>
+              <td>${formatCurrency(total)}</td>
             `;
           });
-        }
-      });
-
-      // Transactions Table
-      const transactionsTable = document.querySelector('#transactions-table tbody');
-      db.collection('transactions').orderBy('date', 'desc').onSnapshot(snapshot => {
-        transactionsTable.innerHTML = '';
-        snapshot.forEach(doc => {
-          const transaction = doc.data();
-          const row = transactionsTable.insertRow();
-          row.innerHTML = `
-            <td>${transaction.date}</td>
-            <td>${transaction.stock_id}</td>
-            <td>${transaction.type}</td>
-            <td>${transaction.shares_original}</td>
-            <td>${transaction.price_original.toFixed(2)}</td>
-            <td>${(transaction.shares_original * transaction.price_original).toFixed(2)}</td>
-          `;
         });
-      });
+      }
     </script>
   </body>
 </html>
