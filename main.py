@@ -1,11 +1,14 @@
 import os
+import json
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
 from forex_python.converter import CurrencyRates
 from transaction_manager import get_split_multiplier
 
-cred = credentials.Certificate(os.environ.get("FIREBASE_ADMIN_CREDENTIALS"))
+# Decode the credentials from the environment variable
+cred_json = json.loads(os.environ.get("FIREBASE_ADMIN_CREDENTIALS"))
+cred = credentials.Certificate(cred_json)
 firebase_admin.initialize_app(cred)
 
 db = firestore.client()
