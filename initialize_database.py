@@ -21,7 +21,59 @@ def initialize_firebase():
 def populate_initial_exchange_rates(db):
     """抓取從 2000 年至今的 TWD/USD 匯率並存入 Firestore"""
     symbol = "TWD=X"
-    start_date = "2000-01-01"
+    start_date = "2000-01-01"import os
+from datetime import datetime, timedelta
+import firebase_admin
+from firebase_admin import credentials, firestore
+from transaction_manager import process_transaction
+
+# Initialize Firebase Admin SDK
+cred = credentials.Certificate(os.environ.get("FIREBASE_ADMIN_CREDENTIALS"))
+firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+def initialize_database():
+    # Clear existing data
+    for col in ['stocks', 'transactions']:
+        docs = db.collection(col).stream()
+        for doc in docs:
+            doc.reference.delete()
+
+    # Sample transactions
+    transactions = [
+        {
+            'stock_id': 'AAPL',
+            'date': (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'),
+            'type': 'buy',
+            'shares_original': 10,
+            'price_original': 150.0,
+            'currency_original': 'USD'
+        },
+        {
+            'stock_id': 'TSLA',
+            'date': (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d'),
+            'type': 'buy',
+            'shares_original': 5,
+            'price_original': 250.0,
+            'currency_original': 'USD'
+        },
+        {
+            'stock_id': 'GOOGL',
+            'date': (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d'),
+            'type': 'buy',
+            'shares_original': 20,
+            'price_original': 120.0,
+            'currency_original': 'USD'
+        }
+    ]
+
+    for transaction in transactions:
+        processed_transaction = process_transaction(transaction)
+        db.collection('transactions').add(processed_transaction)
+
+if __name__ == '__main__':
+    initialize_database()
     today_str = datetime.now().strftime('%Y-%m-%d')
     
     print(f"正在抓取 {symbol} 從 {start_date} 到 {today_str} 的歷史匯率資料...")
