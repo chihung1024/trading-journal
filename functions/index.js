@@ -7,78 +7,74 @@ admin.initializeApp();
 const db = admin.firestore();
 
 // 當交易紀錄或手動拆股紀錄有任何變動時，觸發此函式
-exports.recalculateHoldingsOnTransactionWrite = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
-    .document("users/{userId}/transactions/{transactionId}")
-    .onWrite((change, context) => {
-        return recalculateHoldings(context.params.userId);
-    });
+exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
+    .document("users/{userId}/{collection}/{docId}")
+    .onWrite(async (change, context) => {
+        const { userId, collection } = context.params;
 
-exports.recalculateHoldingsOnSplitWrite = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
-    .document("users/{userId}/manual_splits/{splitId}")
-    .onWrite((change, context) => {
-        return recalculateHoldings(context.params.userId);
-    });
+        // 只在 transactions 或 manual_splits 集合變動時才執行
+        if (collection !== 'transactions' && collection !== 'manual_splits') {
+            return null;
+        }
 
-async function recalculateHoldings(userId) {
-    console.log(`Recalculating holdings for user: ${userId}`);
+        console.log(`Recalculating holdings for user: ${userId} due to change in ${collection}`);
 
-    const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
-    const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
-    const transactionsColRef = db.collection(`users/${userId}/transactions`);
-    const manualSplitsColRef = db.collection(`users/${userId}/manual_splits`);
+        const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
+        const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
+        const transactionsColRef = db.collection(`users/${userId}/transactions`);
+        const manualSplitsColRef = db.collection(`users/${userId}/manual_splits`);
 
-    const [txSnapshot, manualSplitsSnapshot] = await Promise.all([
-        transactionsColRef.get(),
-        manualSplitsColRef.get()
-    ]);
+        const [txSnapshot, manualSplitsSnapshot] = await Promise.all([
+            transactionsColRef.get(),
+            manualSplitsColRef.get()
+        ]);
 
-    if (txSnapshot.empty) {
-        console.log(`No transactions left for user ${userId}. Clearing all data.`);
-        await Promise.all([holdingsDocRef.delete(), historyDocRef.delete()]);
-        return null;
-    }
+        if (txSnapshot.empty) {
+            console.log(`No transactions left for user ${userId}. Clearing all data.`);
+            await Promise.all([holdingsDocRef.delete(), historyDocRef.delete()]);
+            return null;
+        }
 
-    const transactions = txSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    const manualSplits = manualSplitsSnapshot.docs.map(doc => doc.data());
+        const transactions = txSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const manualSplits = manualSplitsSnapshot.docs.map(doc => doc.data());
 
-    const marketData = await getMarketDataFromDb(transactions);
-    
-    // 將手動拆股紀錄與市場資料合併
-    const combinedMarketData = combineMarketData(marketData, manualSplits);
+        const marketData = await getMarketDataFromDb(transactions);
+        
+        const combinedMarketData = combineMarketData(marketData, manualSplits);
 
-    const { holdings, realizedPL, updatedTransactions } = calculateHoldingsAndPL(transactions, combinedMarketData);
-    const portfolioHistory = calculatePortfolioHistory(updatedTransactions, combinedMarketData);
+        const { holdings, realizedPL, updatedTransactions } = calculateHoldingsAndPL(transactions, combinedMarketData);
+        const portfolioHistory = calculatePortfolioHistory(updatedTransactions, combinedMarketData);
 
-    const batch = db.batch();
+        const batch = db.batch();
 
-    updatedTransactions.forEach(tx => {
-        const docRef = transactionsColRef.doc(tx.id);
-        batch.update(docRef, {
-            exchangeRate: tx.exchangeRate,
-            totalValueTWD: tx.totalValueTWD,
-            splitFactor: tx.splitFactor,
-            adjustedQuantity: tx.adjustedQuantity
+        updatedTransactions.forEach(tx => {
+            const docRef = transactionsColRef.doc(tx.id);
+            batch.update(docRef, {
+                exchangeRate: tx.exchangeRate,
+                totalValueTWD: tx.totalValueTWD,
+                splitFactor: tx.splitFactor,
+                adjustedQuantity: tx.adjustedQuantity
+            });
         });
-    });
 
-    batch.set(holdingsDocRef, {
-        holdings: holdings,
-        realizedPL: realizedPL,
-        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-    });
+        batch.set(holdingsDocRef, {
+            holdings: holdings,
+            realizedPL: realizedPL,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        });
 
-    batch.set(historyDocRef, {
-        history: portfolioHistory,
-        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-    });
+        batch.set(historyDocRef, {
+            history: portfolioHistory,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        });
 
-    await batch.commit();
-    console.log(`Successfully recalculated and updated data for user: ${userId}`);
-    return null;
-}
+        await batch.commit();
+        console.log(`Successfully recalculated and updated data for user: ${userId}`);
+        return null;
+    });
 
 function combineMarketData(marketData, manualSplits) {
-    const combinedData = JSON.parse(JSON.stringify(marketData)); // Deep copy
+    const combinedData = JSON.parse(JSON.stringify(marketData));
 
     manualSplits.forEach(split => {
         const symbol = split.symbol.toUpperCase();
@@ -88,10 +84,8 @@ function combineMarketData(marketData, manualSplits) {
         if (!combinedData[symbol].splits) {
             combinedData[symbol].splits = {};
         }
-        // 手動資料覆蓋 API 資料
         const dateStr = split.date.toDate ? split.date.toDate().toISOString().split('T')[0] : split.date;
         combinedData[symbol].splits[dateStr] = parseFloat(split.ratio);
-        console.log(`Applied manual split for ${symbol} on ${dateStr} with ratio ${split.ratio}`);
     });
 
     return combinedData;
@@ -111,7 +105,6 @@ async function getMarketDataFromDb(transactions) {
         if (doc.exists) {
             marketData[symbol] = doc.data();
         } else {
-            console.log(`Market data for ${symbol} not found in DB. Fetching from API...`);
             const newData = await fetchAndSaveMarketData(symbol);
             if (newData) {
                 marketData[symbol] = newData;
@@ -253,7 +246,6 @@ function findPriceForDate(history, targetDate) {
     if (!history || Object.keys(history).length === 0) return null;
 
     const d = new Date(targetDate);
-    // Go back up to 7 days to find a valid price
     for (let i = 0; i < 7; i++) {
         const dateStr = d.toISOString().split('T')[0];
         if (history[dateStr] !== undefined && history[dateStr] !== null) {
@@ -262,8 +254,7 @@ function findPriceForDate(history, targetDate) {
         d.setDate(d.getDate() - 1);
     }
 
-    // If still not found, find the latest available price before the target date
-    const sortedDates = Object.keys(history).sort((a, b) => b.localeCompare(a)); // Sort descending
+    const sortedDates = Object.keys(history).sort((a, b) => b.localeCompare(a));
     const targetDateStr = targetDate.toISOString().split('T')[0];
     for (const dateStr of sortedDates) {
         if (dateStr <= targetDateStr) {
@@ -271,7 +262,7 @@ function findPriceForDate(history, targetDate) {
         }
     }
 
-    return null; // Return null if no price is found
+    return null;
 }
 
 function getDatesBetween(startDate, endDate) {
