@@ -1,18 +1,20 @@
-/*  Cloud Function：onWrite 重新計算持股 & 淨值
- *  重點：
- *  1. 使用 price_history.{pricesAdj, cumSplitRatio}
- *  2. 每筆交易先依 cumSplitRatio 調整股數 / 單價
- *  3. 匯率只在最後乘上 USD→TWD
- *  4. 不再插入 split 事件
+/**
+ * Cloud Function : recalculateHoldings
+ * 1. 讀取使用者全部交易 → 取得/補抓市場資料
+ * 2. 以「前復權股價 pricesAdj + cumSplitRatio」計算
+ * 3. 寫回 users/{uid}/user_data/current_holdings.history
+ * ※ 若完全無交易則清空文件
  */
-const functions   = require("firebase-functions");
-const admin       = require("firebase-admin");
+const functions    = require("firebase-functions");
+const admin        = require("firebase-admin");
 const yahooFinance = require("yahoo-finance2").default;
 
 admin.initializeApp();
 const db = admin.firestore();
 
-//────── 入口 ────────────────────────────────────────────────────────────
+//────────────────────────────────────────
+// 入口
+//────────────────────────────────────────
 exports.recalculateHoldings = functions
   .runWith({ timeoutSeconds: 540 })
   .firestore
@@ -20,90 +22,95 @@ exports.recalculateHoldings = functions
   .onWrite(async (_change, ctx) => {
 
   const uid = ctx.params.uid;
-
-  // 1. 讀取該使用者所有交易
   const txSnap = await db.collection(`users/${uid}/transactions`).get();
   const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-  const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-  const historyRef  = db.doc(`users/${uid}/user_data/portfolio_history`);
 
-  // 若已無任何交易 → 直接清空
+  const holdRef = db.doc(`users/${uid}/user_data/current_holdings`);
+  const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
+
+  // 無交易 → 清空並結束
   if (txs.length === 0) {
     await Promise.all([
-      holdingsRef.set({ holdingsAdj: {}, realizedPL: 0,
-                        lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-      historyRef.set({ historyAdj: {},
-                       lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+      holdRef.set({ holdingsAdj: {}, realizedPL: 0,
+                    lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+      histRef.set({ historyAdj: {},
+                    lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
     ]);
     return null;
   }
 
-  // 2. 取得所有必需的市場資料（股票＋匯率）
-  const symbols = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
-  const marketData = {};
-  for (const s of [...symbols, "TWD=X"]) {
+  //──────────────────────────────────────
+  // 取得（或即時補抓）股價／匯率
+  //──────────────────────────────────────
+  const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
+  const md   = {};                                     // marketData
+  for (const s of [...syms, "TWD=X"]) {
     const col = (s === "TWD=X") ? "exchange_rates" : "price_history";
-    let doc = await db.collection(col).doc(s).get();
-    if (!doc.exists) {
-      await fetchAndSaveMarketData(s);          // 即時補料
+    let doc   = await db.collection(col).doc(s).get();
+    if (!doc.exists) {              // 即時補抓
+      await fetchAndSaveMarketData(s);
       doc = await db.collection(col).doc(s).get();
     }
-    marketData[s] = doc.data();
+    md[s] = doc.data();
   }
 
-  // 3. 計算
-  const { holdings, realizedPL } = calcHoldings(txs, marketData);
-  const historyAdj              = calcHistory(txs, marketData);
+  //──────────────────────────────────────
+  // 計算持股 & 歷史
+  //──────────────────────────────────────
+  const { holdings, realizedPL } = calcHoldings(txs, md);
+  const historyAdj               = calcHistory(txs, md);
 
-  // 4. 寫回 Firestore
+  //──────────────────────────────────────
+  // 寫回 Firestore
+  //──────────────────────────────────────
   await Promise.all([
-    holdingsRef.set({
-      holdingsAdj: holdings,
-      realizedPL:  realizedPL,
-      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    holdRef.set({
+      holdingsAdj : holdings,
+      realizedPL  : realizedPL,
+      lastUpdated : admin.firestore.FieldValue.serverTimestamp()
     }),
-    historyRef.set({
-      historyAdj:  historyAdj,
-      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    histRef.set({
+      historyAdj  : historyAdj,
+      lastUpdated : admin.firestore.FieldValue.serverTimestamp()
     })
   ]);
 
   return null;
 });
-//───────────────────────────────────────────────────────────────────────
 
 
-//====================  即時抓價 (股票 / 匯率)  ==========================
+//────────────────────────────────────────
+// 即時抓價（股票／匯率）
+//────────────────────────────────────────
 async function fetchAndSaveMarketData(symbol) {
-  const col = (symbol === "TWD=X") ? "exchange_rates" : "price_history";
+  const isForex = symbol === "TWD=X";
+  const col     = isForex ? "exchange_rates" : "price_history";
 
-  if (symbol === "TWD=X") {                   // 匯率
+  if (isForex) {
     const hist = await yahooFinance.historical(symbol, { period1: "2000-01-01" });
     const rates = {};
-    hist.forEach(h => { rates[h.date.toISOString().split("T")[0]] = h.close; });
+    hist.forEach(h => { rates[fmtDate(h.date)] = h.close; });
     await db.collection(col).doc(symbol).set({
       rates, lastUpdated: admin.firestore.FieldValue.serverTimestamp()
     });
     return;
   }
 
-  // 股票：前復權價格(直接抓 adjusted)，再算累積拆股倍率
-  const priceHist  = await yahooFinance.historical(symbol,
+  // 股票：前復權價格 & 拆股倍率
+  const priceHist = await yahooFinance.historical(symbol,
                      { period1: "2000-01-01", adjusted: true });
-  const splitHist  = await yahooFinance.historical(symbol,
+  const splitHist = await yahooFinance.historical(symbol,
                      { period1: "2000-01-01", events: "split" });
 
   const pricesAdj = {};
-  priceHist.forEach(p => {
-    pricesAdj[p.date.toISOString().split("T")[0]] = p.close;
-  });
+  priceHist.forEach(p => { pricesAdj[fmtDate(p.date)] = p.close; });
 
   let cum = 1;
   const cumSplitRatio = {};
   splitHist.forEach(s => {
-    const r = s.numerator / s.denominator;   // 例如 1/10 = 0.1
+    const r = s.numerator / s.denominator;
     cum *= r;
-    cumSplitRatio[s.date.toISOString().split("T")[0]] = cum;
+    cumSplitRatio[fmtDate(s.date)] = cum;
   });
 
   await db.collection(col).doc(symbol).set({
@@ -112,140 +119,124 @@ async function fetchAndSaveMarketData(symbol) {
   });
 }
 
-//====================  核心工具函式  ====================================
-const dayStr = d => (new Date(d)).toISOString().split("T")[0];
+//────────────────────────────────────────
+// 工具函式
+//────────────────────────────────────────
+const fmtDate = d => new Date(d).toISOString().split("T")[0];
 
-function getCumRatio(cumMap, dStr) {
-  if (!cumMap) return 1;
-  const dates = Object.keys(cumMap).sort();
+function getCumRatio(map = {}, dStr) {
   let ratio = 1;
-  for (const dt of dates) {
-    if (dt <= dStr) ratio = cumMap[dt]; else break;
-  }
+  for (const k of Object.keys(map).sort())
+    if (k <= dStr) ratio = map[k]; else break;
   return ratio;
 }
 
-function findPrice(map, d) {
-  if (!map) return null;
-  const probe = new Date(d);  probe.setUTCHours(probe.getUTCHours() + 12);
+function findPrice(map = {}, d) {
+  const probe = new Date(d); probe.setUTCHours(probe.getUTCHours() + 12);
   for (let i = 0; i < 7; i++) {
-    const k = dayStr(new Date(probe.getTime() - i * 86400000));
-    if (map[k] !== undefined) return map[k];
+    const key = fmtDate(new Date(probe.getTime() - i * 86400000));
+    if (map[key] !== undefined) return map[key];
   }
   return null;
 }
 
-//====================  計算持股 ========================================
+//────────────────────────────────────────
+// 核心：計算持股
+//────────────────────────────────────────
 function calcHoldings(txs, md) {
-  const rateHist = md["TWD=X"].rates;
-  txs.sort((a, b) =>
-    (a.date.toDate ? a.date.toDate() : new Date(a.date)) -
-    (b.date.toDate ? b.date.toDate() : new Date(b.date)));
+  const rateHist = md["TWD=X"].rates || {};
+  txs.sort((a, b) => (a.date.toDate ? a.date.toDate() : new Date(a.date)) -
+                     (b.date.toDate ? b.date.toDate() : new Date(b.date)));
 
-  const shares = {}, costOrig = {}, costTWD = {}, currency = {};
+  const shares = {}, costOri = {}, costTWD = {}, cur = {};
   let realized = 0;
 
   for (const t of txs) {
-    const d      = t.date.toDate ? t.date.toDate() : new Date(t.date);
-    const sym    = t.symbol.toUpperCase();
-    const mData  = md[sym] || {};
-    const ratio  = getCumRatio(mData.cumSplitRatio, dayStr(d));  // 拆股倍率
-    const qtyAdj = t.quantity * ratio;
-    const pxAdj  = t.price    / ratio;
-    const valOri = qtyAdj * pxAdj;
-    const rate   = (t.currency === "USD")
-                     ? (findPrice(rateHist, d) || 1) : 1;
-    const valTWD = valOri * rate;
+    const d   = t.date.toDate ? t.date.toDate() : new Date(t.date);
+    const sym = t.symbol.toUpperCase();
+    const m   = md[sym] || {};
+    const ratio = getCumRatio(m.cumSplitRatio, fmtDate(d));
+    const qAdj  = t.quantity * ratio;
+    const pAdj  = t.price / ratio;
+    const val0  = qAdj * pAdj;
+    const rt    = (t.currency === "USD") ?
+                  (findPrice(rateHist, d) || 1) : 1;
+    const valT  = val0 * rt;
 
-    if (!shares[sym]) { shares[sym]=0; costOrig[sym]=0; costTWD[sym]=0; }
-    if (!currency[sym]) currency[sym] = t.currency || "TWD";
+    if (!shares[sym]) { shares[sym]=0; costOri[sym]=0; costTWD[sym]=0; }
+    if (!cur[sym]) cur[sym] = t.currency || "TWD";
 
     if (t.type === "buy") {
-      shares[sym]   += qtyAdj;
-      costOrig[sym] += valOri;
-      costTWD[sym]  += valTWD;
-
+      shares[sym]   += qAdj;
+      costOri[sym]  += val0;
+      costTWD[sym]  += valT;
     } else if (t.type === "sell") {
-      const prop = qtyAdj / shares[sym];
-      const costSoldTWD = costTWD[sym] * prop;
-      realized        += valTWD - costSoldTWD;
-      shares[sym]     -= qtyAdj;
-      costOrig[sym]   *= (1 - prop);
-      costTWD[sym]    *= (1 - prop);
-
+      const prop = qAdj / shares[sym];
+      realized   += valT - costTWD[sym] * prop;
+      shares[sym] -= qAdj;
+      costOri[sym] *= (1 - prop);
+      costTWD[sym] *= (1 - prop);
     } else if (t.type === "dividend") {
-      realized += valTWD;
+      realized += valT;
     }
   }
 
-  // 產生 holdings 物件
+  // 彙整
   const holdings = {};
   for (const sym of Object.keys(shares)) {
     if (shares[sym] <= 1e-9) continue;
-    const latestPx   = findPrice((md[sym] || {}).pricesAdj, new Date());
-    const latestRate = (currency[sym] === "USD")
-                         ? (findPrice(rateHist, new Date()) || 1) : 1;
-    const mktValue   = shares[sym] * latestPx * latestRate;
-
+    const px = findPrice((md[sym]||{}).pricesAdj, new Date());
+    const rt = (cur[sym] === "USD") ? (findPrice(rateHist, new Date())||1) : 1;
+    const mv = shares[sym] * px * rt;
     holdings[sym] = {
-      symbol:           sym,
-      quantity:         shares[sym],
-      avgCost:          costOrig[sym] / shares[sym],
-      totalCostTWD:     costTWD[sym],
-      currentPrice:     latestPx,
-      marketValueTWD:   mktValue,
-      unrealizedPLTWD:  mktValue - costTWD[sym],
-      returnRate:       costTWD[sym] > 0 ? (mktValue - costTWD[sym]) /
-                                           costTWD[sym] * 100 : 0
+      symbol          : sym,
+      quantity        : shares[sym],
+      avgCost         : costOri[sym] / shares[sym],
+      totalCostTWD    : costTWD[sym],
+      currentPrice    : px,
+      marketValueTWD  : mv,
+      unrealizedPLTWD : mv - costTWD[sym],
+      returnRate      : costTWD[sym] > 0 ? (mv - costTWD[sym]) / costTWD[sym] * 100 : 0
     };
   }
   return { holdings, realizedPL: realized };
 }
 
-//====================  計算歷史淨值曲線 ================================
+//────────────────────────────────────────
+// 計算每日淨值
+//────────────────────────────────────────
 function calcHistory(txs, md) {
-  if (txs.length === 0) return {};
-  txs.sort((a, b) =>
-    (a.date.toDate ? a.date.toDate() : new Date(a.date)) -
-    (b.date.toDate ? b.date.toDate() : new Date(b.date)));
+  if (!txs.length) return {};
+  txs.sort((a, b) => (a.date.toDate ? a.date.toDate() : new Date(a.date)) -
+                     (b.date.toDate ? b.date.toDate() : new Date(b.date)));
 
-  const firstDate = txs[0].date.toDate ? txs[0].date.toDate()
-                                       : new Date(txs[0].date);
+  const first = txs[0].date.toDate ? txs[0].date.toDate() : new Date(txs[0].date);
   const today = new Date();
-  const rateHist = md["TWD=X"].rates;
+  const rateHist = md["TWD=X"].rates || {};
+  const history  = {};
 
-  const history = {};
-  for (let cur = new Date(firstDate); cur <= today;
-       cur.setDate(cur.getDate() + 1)) {
-
-    const curStr = dayStr(cur);
+  for (let cur = new Date(first); cur <= today; cur.setDate(cur.getDate()+1)) {
+    const dStr = fmtDate(cur);
     let pv = 0;
 
-    // 先算到今天為止各股票「調整後股數」
-    const shares = {};
     for (const t of txs) {
-      const d = t.date.toDate ? t.date.toDate() : new Date(t.date);
-      if (d > cur) continue;
-
-      const sym   = t.symbol.toUpperCase();
-      const ratio = getCumRatio((md[sym]||{}).cumSplitRatio, curStr);
-      const qAdj  = t.quantity * ratio;
-
-      if (!shares[sym]) shares[sym] = 0;
-      if (t.type === "buy")  shares[sym] += qAdj;
-      if (t.type === "sell") shares[sym] -= qAdj;
+      const d0 = t.date.toDate ? t.date.toDate() : new Date(t.date);
+      if (d0 > cur) continue;
+      const sym = t.symbol.toUpperCase();
+      const ratio = getCumRatio((md[sym]||{}).cumSplitRatio, dStr);
+      const qAdj  = t.quantity * ratio * (t.type === "sell" ? -1 : (t.type === "buy" ? 1 : 0));
+      history[sym] = (history[sym] || 0) + qAdj;
     }
 
-    // 市值累加
-    for (const sym of Object.keys(shares)) {
-      if (shares[sym] <= 1e-9) continue;
+    for (const sym of Object.keys(history)) {
+      if (history[sym] <= 1e-9) continue;
       const px = findPrice((md[sym]||{}).pricesAdj, cur);
       if (px === null) continue;
-      const rate = (txs.find(x => x.symbol.toUpperCase() === sym).currency === "USD")
-                     ? (findPrice(rateHist, cur) || 1) : 1;
-      pv += shares[sym] * px * rate;
+      const rt = txs.find(x => x.symbol.toUpperCase() === sym).currency === "USD"
+                 ? (findPrice(rateHist, cur) || 1) : 1;
+      pv += history[sym] * px * rt;
     }
-    history[curStr] = pv;
+    history[dStr] = pv;
   }
   return history;
 }
