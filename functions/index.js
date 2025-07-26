@@ -14,7 +14,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
         const logger = new Logger(logRef);
 
         try {
-            await logger.log("--- Recalculation triggered ---");
+            await logger.log("--- Recalculation triggered (v2 - Final Fix) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -105,6 +105,7 @@ async function getMarketDataFromDb(transactions, logger) {
     return marketData;
 }
 
+// THE FIX IS HERE
 async function fetchAndSaveMarketData(symbol, logger) {
     try {
         const isForex = symbol === "TWD=X";
@@ -112,10 +113,14 @@ async function fetchAndSaveMarketData(symbol, logger) {
         const docRef = db.collection(collectionName).doc(symbol);
 
         await logger.log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
-        const queryOptions = { period1: '2000-01-01', events: 'split,div' };
+        
+        // **THE FIX**: Simplified queryOptions. yahoo-finance2 handles events by default.
+        const queryOptions = { period1: '2000-01-01' }; 
         const results = await yahooFinance.historical(symbol, queryOptions);
+
         await logger.log(`[Fetch] Received data for ${symbol}. Shaping payload...`);
 
+        // The rest of the function is robust and handles the returned data correctly.
         const prices = {};
         results.forEach(item => {
             prices[item.date.toISOString().split('T')[0]] = item.close;
@@ -124,7 +129,7 @@ async function fetchAndSaveMarketData(symbol, logger) {
         const payload = {
             prices: prices,
             lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            dataSource: 'yahoo-finance2-emergency-fetch',
+            dataSource: 'yahoo-finance2-emergency-fetch-v2', // Mark the data source version
         };
 
         if (isForex) {
@@ -154,7 +159,7 @@ async function fetchAndSaveMarketData(symbol, logger) {
     }
 }
 
-// --- Logger Class ---
+// --- Logger Class (Unchanged) ---
 class Logger {
     constructor(docRef) {
         this.docRef = docRef;
@@ -164,16 +169,13 @@ class Logger {
     async log(message) {
         const timestamp = new Date().toISOString();
         const logEntry = `${timestamp}: ${message}`;
-        console.log(logEntry); // Also log to standard console
-        this.logs.push(logEntry);
-        // Write logs to Firestore incrementally
-        await this.docRef.set({ entries: this.logs }, { merge: true });
+        console.log(logEntry);
+        await this.docRef.set({ entries: admin.firestore.FieldValue.arrayUnion(logEntry) }, { merge: true });
     }
 }
 
 // --- FIFO Calculation Engine (Unchanged) ---
 function calculatePortfolioFIFO(transactions, marketData) {
-    // This entire function remains the same as the previous version.
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
