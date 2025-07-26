@@ -1,11 +1,13 @@
 import os
+import json
 from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, firestore
 from transaction_manager import process_transaction
 
-# Initialize Firebase Admin SDK
-cred = credentials.Certificate(os.environ.get("FIREBASE_ADMIN_CREDENTIALS"))
+# Decode the credentials from the environment variable
+cred_json = json.loads(os.environ.get("FIREBASE_ADMIN_CREDENTIALS"))
+cred = credentials.Certificate(cred_json)
 firebase_admin.initialize_app(cred)
 
 db = firestore.client()
