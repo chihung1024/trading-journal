@@ -20,8 +20,6 @@ jobs:
         with:
           node-version: 18
 
-      
-
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
@@ -33,6 +31,6 @@ jobs:
         run: echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > ./gcloud-sa-key.json
 
       - name: Deploy to Firebase Functions
-        run: firebase deploy --only functions --project trading-journal-4922c --non-interactive
+        run: firebase deploy --only functions:recalculateHoldingsOnTransactionWrite,functions:recalculateHoldingsOnSplitWrite --project trading-journal-4922c --non-interactive --force
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ./gcloud-sa-key.json
