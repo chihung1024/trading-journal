@@ -1,10 +1,11 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
+const yahooFinance = require("yahoo-finance2").default; // Re-import for emergency fetches
 
 admin.initializeApp();
 const db = admin.firestore();
 
-// Main Cloud Function triggered by any change in a user's transactions.
+// Main Cloud Function
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -14,11 +15,9 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
         const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
         const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
 
-        // 1. Get all transactions for the user.
         const transactionsSnapshot = await db.collection(`users/${userId}/transactions`).get();
         const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-        // If no transactions exist, clear all data and exit.
         if (transactions.length === 0) {
             console.log(`No transactions found for user ${userId}. Clearing all portfolio data.`);
             await Promise.all([
@@ -28,13 +27,11 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
             return null;
         }
 
-        // 2. Get all necessary market data from our Firestore database.
+        // The getMarketDataFromDb function now handles emergency data fetching.
         const marketData = await getMarketDataFromDb(transactions);
 
-        // 3. Perform the core calculation using the event timeline model.
         const { holdings, totalRealizedPL, portfolioHistory } = calculatePortfolio(transactions, marketData);
 
-        // 4. Save the newly calculated results back to Firestore.
         console.log(`Saving calculated data for user ${userId}. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}`);
         await Promise.all([
             holdingsDocRef.set({
@@ -53,46 +50,110 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 540, memory: '
     });
 
 /**
- * Fetches all required market data (prices, splits, dividends, rates) from Firestore.
- * This function no longer calls external APIs.
+ * Fetches market data from Firestore and performs emergency fetches from Yahoo Finance if data is missing.
  */
 async function getMarketDataFromDb(transactions) {
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
     const marketData = {};
-    const promises = [];
+    const symbolsToFetch = [];
 
-    // Fetch stock data (prices, splits, dividends)
-    for (const symbol of symbols) {
-        const docRef = db.collection("price_history").doc(symbol);
-        promises.push(docRef.get().then(doc => {
+    // First, try to get all data from Firestore
+    const promises = symbols.map(symbol => 
+        db.collection("price_history").doc(symbol).get().then(doc => {
             if (doc.exists) {
                 marketData[symbol] = doc.data();
             } else {
-                console.error(`FATAL: Market data for symbol '${symbol}' not found in Firestore. Calculations may be incorrect.`);
-                marketData[symbol] = { prices: {}, splits: {}, dividends: {} }; // Provide empty data to prevent crashes
+                console.log(`Data for symbol '${symbol}' not found in Firestore. Queuing for emergency fetch.`);
+                symbolsToFetch.push(symbol);
             }
-        }));
-    }
-
-    // Fetch exchange rate data
-    const ratesDocRef = db.collection("exchange_rates").doc("TWD=X");
-    promises.push(ratesDocRef.get().then(doc => {
-        if (doc.exists) {
-            marketData["TWD=X"] = doc.data();
-        } else {
-            console.error("FATAL: Exchange rate data 'TWD=X' not found in Firestore. Calculations will be incorrect.");
-            marketData["TWD=X"] = { rates: {} };
-        }
-    }));
+        })
+    );
+    // Also fetch exchange rates
+    promises.push(
+        db.collection("exchange_rates").doc("TWD=X").get().then(doc => {
+            if (doc.exists) {
+                marketData["TWD=X"] = doc.data();
+            } else {
+                console.log(`Exchange rate data 'TWD=X' not found. Queuing for emergency fetch.`);
+                symbolsToFetch.push("TWD=X");
+            }
+        })
+    );
 
     await Promise.all(promises);
-    console.log(`Successfully fetched market data for ${Object.keys(marketData).length} symbols from Firestore.`);
+
+    // If any symbols were not found, fetch them now
+    if (symbolsToFetch.length > 0) {
+        console.log(`Performing emergency fetch for ${symbolsToFetch.length} symbols: ${symbolsToFetch.join(', ')}`);
+        const fetchPromises = symbolsToFetch.map(symbol => fetchAndSaveMarketData(symbol));
+        const fetchedData = await Promise.all(fetchPromises);
+        
+        // Merge fetched data into our main marketData object
+        fetchedData.forEach((data, index) => {
+            if (data) {
+                const symbol = symbolsToFetch[index];
+                marketData[symbol] = data;
+            }
+        });
+    }
+
+    console.log(`Successfully prepared market data for ${Object.keys(marketData).length} symbols.`);
     return marketData;
 }
 
 /**
- * The core calculation engine based on an event timeline.
+ * Fetches full historical data for a single symbol from Yahoo Finance and saves it to Firestore.
+ * This is the emergency fetch function.
  */
+async function fetchAndSaveMarketData(symbol) {
+    try {
+        const isForex = symbol === "TWD=X";
+        const collectionName = isForex ? "exchange_rates" : "price_history";
+        const docRef = db.collection(collectionName).doc(symbol);
+
+        console.log(`Fetching full history for ${symbol} from Yahoo Finance...`);
+        const queryOptions = { period1: '2000-01-01', events: 'split,div' };
+        const results = await yahooFinance.historical(symbol, queryOptions);
+
+        // Standardize data format to match python script output
+        const prices = {};
+        results.forEach(item => {
+            prices[item.date.toISOString().split('T')[0]] = item.close;
+        });
+
+        const payload = {
+            prices: prices,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            dataSource: 'yahoo-finance2-emergency-fetch',
+        };
+
+        if (isForex) {
+            payload.rates = prices; // For exchange rates, the key is 'rates'
+            delete payload.prices;
+        } else {
+            const splits = {};
+            (results.splits || []).forEach(item => {
+                splits[item.date.toISOString().split('T')[0]] = item.numerator / item.denominator;
+            });
+            const dividends = {};
+            (results.dividends || []).forEach(item => {
+                dividends[item.date.toISOString().split('T')[0]] = item.amount;
+            });
+            payload.splits = splits;
+            payload.dividends = dividends;
+        }
+
+        await docRef.set(payload);
+        console.log(`Successfully fetched and saved emergency data for ${symbol} to Firestore.`);
+        return payload;
+
+    } catch (error) {
+        console.error(`ERROR during emergency fetch for ${symbol}:`, error);
+        return null; // Return null on failure
+    }
+}
+
+// The core calculation engine - REMAINS THE SAME
 function calculatePortfolio(transactions, marketData) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -220,6 +281,7 @@ function calculatePortfolio(transactions, marketData) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
+// Helper functions - REMAINS THE SAME
 function calculateDailyMarketValue(portfolio, marketData, date) {
     let totalValue = 0;
     const rateOnDate = findNearestRate(marketData["TWD=X"]?.rates || {}, date);
@@ -243,10 +305,6 @@ function findNearestRate(rateHistory, targetDate) {
     return findNearestDataPoint(rateHistory, targetDate);
 }
 
-/**
- * A robust function to find the closest available data point for a given date.
- * It searches backwards up to 7 days, then falls back to the closest earlier date.
- */
 function findNearestDataPoint(history, targetDate) {
     if (!history || Object.keys(history).length === 0) return 1; // Return a neutral value
 
