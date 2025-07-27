@@ -32,8 +32,8 @@ def get_all_symbols_from_transactions(db):
     print(f"Found {len(all_symbols)} unique symbols: {list(all_symbols)}")
     return list(all_symbols)
 
-# Simplified data fetcher. It no longer performs reverse adjustments.
-# It fetches and stores the split-adjusted prices directly from yfinance.
+# Simplified data fetcher. It no longer fetches or stores split data.
+# It only fetches prices (which are split-adjusted) and dividends.
 def fetch_and_update_market_data(db, symbols):
     all_symbols_to_update = list(set(symbols + ["TWD=X"]))
     
@@ -41,7 +41,7 @@ def fetch_and_update_market_data(db, symbols):
         print(f"--- Processing: {symbol} ---")
         try:
             stock = yf.Ticker(symbol)
-            # auto_adjust=False gives split-adjusted prices and separate split/dividend data.
+            # auto_adjust=False gives split-adjusted prices and separate dividend data.
             hist = stock.history(start="2000-01-01", interval="1d", auto_adjust=False, back_adjust=False)
             
             if hist.empty:
@@ -49,7 +49,6 @@ def fetch_and_update_market_data(db, symbols):
                 continue
 
             prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if not pd.isna(val)}
-            splits = {idx.strftime('%Y-%m-%d'): val for idx, val in stock.splits.items()}
             dividends = {idx.strftime('%Y-%m-%d'): val for idx, val in stock.dividends.items()}
 
             is_forex = symbol == "TWD=X"
@@ -58,23 +57,26 @@ def fetch_and_update_market_data(db, symbols):
 
             payload = {
                 "prices": prices,
-                "splits": splits,
                 "dividends": dividends,
                 "lastUpdated": datetime.now().isoformat(),
-                "dataSource": "yfinance-split-adjusted-v1"
+                "dataSource": "yfinance-user-defined-split-model-v1"
             }
             if is_forex:
                 payload["rates"] = payload.pop("prices")
+                del payload["dividends"] # No dividends for forex
+
+            # We no longer store split data from yfinance
+            payload["splits"] = {}
 
             doc_ref.set(payload)
-            print(f"Successfully wrote split-adjusted price data for {symbol} to Firestore.")
+            print(f"Successfully wrote price/dividend data for {symbol} to Firestore.")
 
         except Exception as e:
             print(f"ERROR: Failed to process data for {symbol}. Reason: {e}")
 
 if __name__ == "__main__":
     db_client = initialize_firebase()
-    print("Starting market data update script (Simplified Model)...")
+    print("Starting market data update script (User-Defined Split Model)...")
     symbols = get_all_symbols_from_transactions(db_client)
     if symbols:
         fetch_and_update_market_data(db_client, symbols)
