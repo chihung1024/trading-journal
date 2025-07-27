@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final version with the definitive API call fix.
+// Final, complete, and simplified version based on the original price model.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -20,7 +20,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v18 - Final API Fix) ---");
+            log("--- Recalculation triggered (v18 - Final Corrected Code) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -91,11 +91,9 @@ async function getMarketDataFromDb(transactions, log) {
     return marketData;
 }
 
-// **THE FINAL FIX IS HERE**
 async function fetchAndReverseAdjustMarketData(symbol, log) {
     try {
         log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
-        // Use the corrected, simplified query options
         const queryOptions = { period1: '2000-01-01' };
         const hist = await yahooFinance.historical(symbol, queryOptions);
 
@@ -110,22 +108,21 @@ async function fetchAndReverseAdjustMarketData(symbol, log) {
         const splits = {};
         let cumulativeRatio = 1.0;
 
-        const splitEvents = (hist.splits || []).sort((a, b) => b.date - a.date);
+        const splitEvents = (hist.splits || []).sort((a, b) => new Date(b.date) - new Date(a.date));
         let splitIndex = 0;
 
         for (let i = hist.length - 1; i >= 0; i--) {
             const item = hist[i];
-            const dateStr = item.date.toISOString().split('T')[0];
+            const itemDate = new Date(item.date);
 
-            if (splitIndex < splitEvents.length && item.date < splitEvents[splitIndex].date) {
+            while (splitIndex < splitEvents.length && itemDate < splitEvents[splitIndex].date) {
                 cumulativeRatio *= splitEvents[splitIndex].numerator / splitEvents[splitIndex].denominator;
                 splitIndex++;
             }
-            prices[dateStr] = item.close * cumulativeRatio;
+            prices[item.date.toISOString().split('T')[0]] = item.close * cumulativeRatio;
         }
         
-        // Re-sort splits chronologically for storage
-        (hist.splits || []).sort((a, b) => a.date - b.date).forEach(s => {
+        (hist.splits || []).forEach(s => {
             splits[s.date.toISOString().split('T')[0]] = s.numerator / s.denominator;
         });
 
@@ -134,7 +131,7 @@ async function fetchAndReverseAdjustMarketData(symbol, log) {
             splits: splits,
             dividends: (hist.dividends || []).reduce((acc, d) => ({ ...acc, [d.date.toISOString().split('T')[0]]: d.amount }), {}),
             lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            dataSource: 'emergency-fetch-original-price-v3'
+            dataSource: 'emergency-fetch-original-price-v4'
         };
 
         if (symbol === 'TWD=X') {
@@ -149,7 +146,6 @@ async function fetchAndReverseAdjustMarketData(symbol, log) {
     }
 }
 
-// The simplified calculation engine is now stable.
 function calculatePortfolio(transactions, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -167,7 +163,7 @@ function calculatePortfolio(transactions, marketData, log) {
             events.push({ date: new Date(date), symbol, amount, eventType: 'dividend' });
         });
     }
-    events.sort((a, b) => a.date - b.date);
+    events.sort((a, b) => new Date(a.date) - new Date(b.date));
 
     const portfolio = {};
     let totalRealizedPL = 0;
