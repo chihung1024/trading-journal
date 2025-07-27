@@ -49,8 +49,13 @@ def fetch_and_update_market_data(db, symbols):
             prices_df = hist[['Close']].copy()
             splits_df = stock.splits
 
-            prices_df.index = prices_df.index.tz_localize(None)
-            splits_df.index = splits_df.index.tz_localize(None)
+            if not prices_df.index.tz:
+                prices_df.index = prices_df.index.tz_localize('UTC')
+            if not splits_df.index.tz:
+                splits_df.index = splits_df.index.tz_localize('UTC')
+
+            prices_df.index = prices_df.index.tz_convert(None)
+            splits_df.index = splits_df.index.tz_convert(None)
 
             prices_df.sort_index(ascending=False, inplace=True)
             splits_df.sort_index(ascending=False, inplace=True)
@@ -80,7 +85,7 @@ def fetch_and_update_market_data(db, symbols):
                 "splits": {idx.strftime('%Y-%m-%d'): val for idx, val in splits_df.items()},
                 "dividends": {idx.strftime('%Y-%m-%d'): val for idx, val in dividends.items()} if dividends is not None else {},
                 "lastUpdated": datetime.now().isoformat(),
-                "dataSource": "yfinance-original-price-model-v3"
+                "dataSource": "yfinance-original-price-model-v4"
             }
             if is_forex:
                 payload["rates"] = payload.pop("prices")
