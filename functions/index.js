@@ -20,7 +20,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v28 - Final Calculation Fix) ---");
+            log("--- Recalculation triggered (v29 - Final Split Fix) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -134,6 +134,7 @@ async function fetchAndSaveMarketData(symbol, log) {
     }
 }
 
+// Final, corrected calculation engine.
 function calculatePortfolio(transactions, userSplits, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
