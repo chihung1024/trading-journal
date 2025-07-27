@@ -74,62 +74,12 @@ def fetch_and_update_market_data(db, symbols):
         except Exception as e:
             print(f"ERROR: Failed to process data for {symbol}. Reason: {e}")
 
-def get_all_user_ids(db):
-    user_ids = set()
-    try:
-        users = db.collection("users").stream()
-        for user in users:
-            user_ids.add(user.id)
-    except Exception as e:
-        print(f"Warning: Could not read users. Error: {e}")
-    print(f"Found {len(user_ids)} unique users: {list(user_ids)}")
-    return list(user_ids)
-
-import google.auth
-import google.auth.transport.requests
-import requests
-
-def trigger_recalculation_for_users(db, user_ids):
-    print("Preparing to trigger recalculation via HTTP...")
-    
-    # Get default credentials from the environment
-    creds, project_id = google.auth.default()
-    
-    # Get the ID token
-    auth_req = google.auth.transport.requests.Request()
-    creds.refresh(auth_req)
-    id_token = creds.id_token
-
-    # Discover the Cloud Functions region and URL
-    # This is a more robust way than hardcoding the URL
-    base_url = f"https://cloudfunctions.googleapis.com/v1/projects/{project_id}/locations/us-central1/functions/recalculatePortfolio"
-    
-    headers = {
-        "Authorization": f"Bearer {id_token}",
-        "Content-Type": "application/json"
-    }
-
-    for user_id in user_ids:
-        print(f"Sending trigger for user: {user_id}")
-        data = { "data": { "userId": user_id } }
-        try:
-            response = requests.post(base_url, headers=headers, json=data, timeout=30)
-            if response.status_code == 200:
-                print(f"Successfully triggered recalculation for {user_id}. Response: {response.text}")
-            else:
-                print(f"Error triggering recalculation for {user_id}. Status: {response.status_code}, Response: {response.text}")
-        except Exception as e:
-            print(f"ERROR: Exception while triggering recalculation for {user_id}. Reason: {e}")
-
 if __name__ == "__main__":
     db_client = initialize_firebase()
     print("Starting market data update script (User-Defined Split Model)...")
     symbols = get_all_symbols_from_transactions(db_client)
     if symbols:
         fetch_and_update_market_data(db_client, symbols)
-        user_ids = get_all_user_ids(db_client)
-        if user_ids:
-            trigger_recalculation_for_users(db_client, user_ids)
     else:
         print("No transactions found.")
     print("Market data update script finished.")
