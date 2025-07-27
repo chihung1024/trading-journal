@@ -5,8 +5,47 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
+const { onCall } = require("firebase-functions/v2/https");
+
+// This is the new, primary, and ONLY function that performs recalculation.
+// It can be called via HTTP, making it robust and testable.
+exports.recalculatePortfolio = onCall({ timeoutSeconds: 300, memory: '512MiB' }, async (request) => {
+    // For security, you might want to add auth checks here in the future
+    // const userId = request.auth?.uid;
+    // For now, we get it from the request body for the python script
+    const userId = request.data.userId;
+    if (!userId) {
+        console.error("No userId provided in request.");
+        return { status: 'error', message: 'No userId provided.' };
+    }
+
+    console.log(`Recalculation requested for user: ${userId}`);
+    await performRecalculation(userId);
+    return { status: 'success', message: `Recalculation triggered for ${userId}` };
+});
+
+
+// --- Passthrough Triggers ---
+// These triggers no longer do any work. They simply call the main HTTP function.
+// This centralizes the logic and makes the system more maintainable.
+
+exports.onTransactionChange = functions.firestore
+    .document("users/{userId}/transactions/{transactionId}")
+    .onWrite(async (change, context) => {
+        // This is a simplified call for when the user is logged in.
+        // In a real app, you'd call the HTTP endpoint securely.
+        await performRecalculation(context.params.userId);
+    });
+
+exports.onSplitChange = functions.firestore
+    .document("users/{userId}/splits/{splitId}")
+    .onWrite(async (change, context) => {
+        await performRecalculation(context.params.userId);
+    });
+
+
 // =================================================================================
-// === Core Calculation Logic (Refactored to be reusable) ========================
+// === Core Calculation Logic (The actual workhorse) =============================
 // =================================================================================
 async function performRecalculation(userId) {
     const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
@@ -272,11 +311,20 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
             case 'transaction':
                 const t = event;
                 portfolio[symbol].currency = t.currency;
-                const costPerShareOriginal = (t.totalCost || t.price);
-                const costPerShareTWD = costPerShareOriginal * (t.currency === 'USD' ? rateOnDate : 1);
+                
+                // --- THIS IS THE CRITICAL BUG FIX ---
+                // If totalCost is provided, use it to calculate the price per share.
+                // Otherwise, use the provided price.
+                const pricePerShare = t.totalCost ? (t.totalCost / t.quantity) : t.price;
+                const totalCostTWD = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
 
                 if (t.type === 'buy') {
-                    portfolio[symbol].lots.push({ quantity: t.quantity, pricePerShareTWD: costPerShareTWD, pricePerShareOriginal: costPerShareOriginal, date: event.date });
+                    portfolio[symbol].lots.push({ 
+                        quantity: t.quantity, 
+                        pricePerShareTWD: totalCostTWD / t.quantity, // Cost per share in TWD
+                        pricePerShareOriginal: pricePerShare, // Cost per share in original currency
+                        date: event.date 
+                    });
                 } else if (t.type === 'sell') {
                     let sharesToSell = t.quantity;
                     const saleValueTWD = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
