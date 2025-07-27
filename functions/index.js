@@ -1,55 +1,28 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const yahooFinance = require("yahoo-finance2").default;
+const { onCall } = require("firebase-functions/v2/https");
 
 admin.initializeApp();
 const db = admin.firestore();
 
-// --- Trigger 1: Direct, immediate recalculation on user actions ---
-exports.onTransactionChange = functions.firestore
-    .document("users/{userId}/transactions/{transactionId}")
-    .onWrite(async (change, context) => {
-        console.log(`Transaction change detected for user ${context.params.userId}. Triggering recalculation.`);
-        await performRecalculation(context.params.userId);
-    });
+// This is the single, robust, callable function for all recalculations.
+exports.recalculatePortfolio = onCall({ timeoutSeconds: 300, memory: '1GB' }, async (request) => {
+    const userId = request.auth?.uid;
+    if (!userId) {
+        console.error("Recalculation called without an authenticated user.");
+        throw new functions.https.HttpsError('unauthenticated', 'The function must be called while authenticated.');
+    }
+    console.log(`Recalculation requested for user: ${userId}`);
+    try {
+        await performRecalculation(userId);
+        return { status: 'success', message: `Recalculation completed for ${userId}` };
+    } catch (error) {
+        console.error(`Error during recalculation for user ${userId}:`, error);
+        throw new functions.https.HttpsError('internal', 'An error occurred during recalculation.', error.message);
+    }
+});
 
-exports.onSplitChange = functions.firestore
-    .document("users/{userId}/splits/{splitId}")
-    .onWrite(async (change, context) => {
-        console.log(`Split change detected for user ${context.params.userId}. Triggering recalculation.`);
-        await performRecalculation(context.params.userId);
-    });
-
-// --- Trigger 2: Automatic recalculation when market data is updated ---
-exports.onPriceHistoryUpdate = functions.firestore
-    .document("price_history/{symbol}")
-    .onWrite(async (change, context) => {
-        const symbol = context.params.symbol;
-        console.log(`Price history update detected for symbol: ${symbol}.`);
-
-        // Find all users who hold this symbol
-        const usersRef = db.collection('users');
-        const querySnapshot = await usersRef.where(`holdings.${symbol}`, '>', 0).get();
-
-        if (querySnapshot.empty) {
-            console.log(`No users found holding ${symbol}. No recalculations triggered.`);
-            return;
-        }
-
-        const userIds = querySnapshot.docs.map(doc => doc.id);
-        console.log(`Found ${userIds.length} users holding ${symbol}: ${userIds.join(', ')}`);
-
-        // Trigger recalculation for each user
-        const recalculationPromises = userIds.map(userId => performRecalculation(userId));
-        await Promise.all(recalculationPromises);
-
-        console.log(`Finished triggering recalculations for ${symbol}.`);
-    });
-
-
-// =================================================================================
-// === Core Calculation Logic (The actual workhorse) =============================
-// =================================================================================
+// Core calculation logic - no longer a trigger, just a function to be called.
 async function performRecalculation(userId) {
     const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
     const logs = [];
@@ -60,7 +33,7 @@ async function performRecalculation(userId) {
     };
 
     try {
-        log("--- Recalculation triggered (v31 - Unified Trigger) ---");
+        log("--- Recalculation triggered ---");
 
         const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
         const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -76,15 +49,19 @@ async function performRecalculation(userId) {
         if (transactions.length === 0) {
             log("No transactions found. Clearing data.");
             await Promise.all([
-                holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, xirr: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }),
                 historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
             ]);
             return;
         }
 
+        // This function now ONLY reads from the database.
         const marketData = await getMarketDataFromDb(transactions, log);
         if (!marketData || Object.keys(marketData).length === 0) {
-            throw new Error("Market data is empty after fetch.");
+            // This case might happen if main.py hasn't run yet for the required symbols.
+            // We should not proceed with calculation if market data is missing.
+            log("Market data not found in Firestore for the required symbols. Aborting calculation.");
+            return;
         }
 
         log("Starting final, corrected calculation...");
@@ -92,21 +69,11 @@ async function performRecalculation(userId) {
         if (!result) throw new Error("Calculation function returned undefined.");
 
         const { holdings, totalRealizedPL, portfolioHistory, xirr } = result;
-        log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}, XIRR: ${xirr}`);
+        log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, XIRR: ${xirr}`);
 
         log("Saving results...");
-
-        // Prepare the final data, ensuring the trigger field is removed to prevent loops
-        const finalData = { 
-            holdings, 
-            totalRealizedPL, 
-            xirr, 
-            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            force_recalc_timestamp: admin.firestore.FieldValue.delete() // Remove the trigger field
-        };
-
         await Promise.all([
-            holdingsDocRef.set(finalData, { merge: true }), // Use merge to avoid race conditions
+            holdingsDocRef.set({ holdings, totalRealizedPL, xirr, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }),
             historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
         ]);
         log("--- Recalculation finished successfully! ---");
@@ -117,6 +84,31 @@ async function performRecalculation(userId) {
     } finally {
         await logRef.set({ entries: logs });
     }
+}
+
+async function getMarketDataFromDb(transactions, log) {
+    const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
+    const allSymbols = [...new Set([...symbols, "TWD=X"])];
+    log(`Reading market data for symbols: [${allSymbols.join(', ')}] from Firestore.`);
+    const marketData = {};
+
+    const docRefs = allSymbols.map(symbol => {
+        const collectionName = symbol === "TWD=X" ? "exchange_rates" : "price_history";
+        return db.collection(collectionName).doc(symbol);
+    });
+
+    const docSnapshots = await db.getAll(...docRefs);
+
+    for (const doc of docSnapshots) {
+        if (doc.exists) {
+            log(`Found ${doc.id} in Firestore.`);
+            marketData[doc.id] = doc.data();
+        } else {
+            log(`Warning: Market data for ${doc.id} not found in Firestore.`);
+            // We no longer fetch from the network here. This is the single source of truth.
+        }
+    }
+    return marketData;
 }
 
 // =================================================================================
@@ -160,77 +152,7 @@ exports.recalculateOnSplit = functions.firestore
 // === Data Fetching and Processing Functions (Unchanged) ========================
 // =================================================================================
 
-async function getMarketDataFromDb(transactions, log) {
-    const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
-    const allSymbols = [...new Set([...symbols, "TWD=X"])];
-    log(`Required symbols: [${allSymbols.join(', ')}]`);
-    const marketData = {};
 
-    for (const symbol of allSymbols) {
-        const docRef = db.collection(symbol === "TWD=X" ? "exchange_rates" : "price_history").doc(symbol);
-        const doc = await docRef.get();
-
-        if (doc.exists) {
-            log(`Found ${symbol} in Firestore.`);
-            marketData[symbol] = doc.data();
-        } else {
-            log(`Data for ${symbol} not found. Performing emergency fetch...`);
-            const fetchedData = await fetchAndSaveMarketData(symbol, log);
-            if (fetchedData) {
-                marketData[symbol] = fetchedData;
-                await docRef.set(fetchedData);
-                log(`Successfully fetched and saved data for ${symbol}.`);
-            }
-        }
-    }
-    return marketData;
-}
-
-async function fetchAndSaveMarketData(symbol, log) {
-    try {
-        log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
-        // Correctly fetch both price history and dividend/split events
-        const queryOptions = { period1: '2000-01-01', events: 'history' };
-        const result = await yahooFinance.historical(symbol, queryOptions);
-
-        if (!result || result.length === 0) {
-            log(`[Fetch] Warning: No data returned for ${symbol}.`);
-            return null;
-        }
-
-        log(`[Fetch] Received ${result.length} data points for ${symbol}.`);
-
-        const prices = {};
-        result.forEach(item => {
-            prices[item.date.toISOString().split('T')[0]] = item.close;
-        });
-
-        const dividends = {};
-        if (result.dividends) {
-            result.dividends.forEach(item => {
-                dividends[item.date.toISOString().split('T')[0]] = item.amount;
-            });
-        }
-
-        const payload = {
-            prices: prices,
-            splits: {}, // We continue to use user-defined splits
-            dividends: dividends,
-            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            dataSource: 'emergency-fetch-user-split-model-v3'
-        };
-
-        if (symbol === 'TWD=X') {
-            payload.rates = payload.prices;
-            delete payload.dividends;
-        }
-
-        return payload;
-    } catch (e) {
-        log(`[Fetch Error] for ${symbol}: ${e.message}`);
-        return null;
-    }
-}
 
 function calculateXIRR(cashflows) {
     if (cashflows.length < 2) return 0;
