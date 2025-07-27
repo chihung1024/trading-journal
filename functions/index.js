@@ -5,42 +5,45 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-const { onCall } = require("firebase-functions/v2/https");
-
-// This is the new, primary, and ONLY function that performs recalculation.
-// It can be called via HTTP, making it robust and testable.
-exports.recalculatePortfolio = onCall({ timeoutSeconds: 300, memory: '512MiB' }, async (request) => {
-    // For security, you might want to add auth checks here in the future
-    // const userId = request.auth?.uid;
-    // For now, we get it from the request body for the python script
-    const userId = request.data.userId;
-    if (!userId) {
-        console.error("No userId provided in request.");
-        return { status: 'error', message: 'No userId provided.' };
-    }
-
-    console.log(`Recalculation requested for user: ${userId}`);
-    await performRecalculation(userId);
-    return { status: 'success', message: `Recalculation triggered for ${userId}` };
-});
-
-
-// --- Passthrough Triggers ---
-// These triggers no longer do any work. They simply call the main HTTP function.
-// This centralizes the logic and makes the system more maintainable.
-
+// --- Trigger 1: Direct, immediate recalculation on user actions ---
 exports.onTransactionChange = functions.firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
-        // This is a simplified call for when the user is logged in.
-        // In a real app, you'd call the HTTP endpoint securely.
+        console.log(`Transaction change detected for user ${context.params.userId}. Triggering recalculation.`);
         await performRecalculation(context.params.userId);
     });
 
 exports.onSplitChange = functions.firestore
     .document("users/{userId}/splits/{splitId}")
     .onWrite(async (change, context) => {
+        console.log(`Split change detected for user ${context.params.userId}. Triggering recalculation.`);
         await performRecalculation(context.params.userId);
+    });
+
+// --- Trigger 2: Automatic recalculation when market data is updated ---
+exports.onPriceHistoryUpdate = functions.firestore
+    .document("price_history/{symbol}")
+    .onWrite(async (change, context) => {
+        const symbol = context.params.symbol;
+        console.log(`Price history update detected for symbol: ${symbol}.`);
+
+        // Find all users who hold this symbol
+        const usersRef = db.collection('users');
+        const querySnapshot = await usersRef.where(`holdings.${symbol}`, '>', 0).get();
+
+        if (querySnapshot.empty) {
+            console.log(`No users found holding ${symbol}. No recalculations triggered.`);
+            return;
+        }
+
+        const userIds = querySnapshot.docs.map(doc => doc.id);
+        console.log(`Found ${userIds.length} users holding ${symbol}: ${userIds.join(', ')}`);
+
+        // Trigger recalculation for each user
+        const recalculationPromises = userIds.map(userId => performRecalculation(userId));
+        await Promise.all(recalculationPromises);
+
+        console.log(`Finished triggering recalculations for ${symbol}.`);
     });
 
 
@@ -186,27 +189,35 @@ async function getMarketDataFromDb(transactions, log) {
 async function fetchAndSaveMarketData(symbol, log) {
     try {
         log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
-        const queryOptions = { period1: '2000-01-01' };
-        const hist = await yahooFinance.historical(symbol, queryOptions);
+        // Correctly fetch both price history and dividend/split events
+        const queryOptions = { period1: '2000-01-01', events: 'history' };
+        const result = await yahooFinance.historical(symbol, queryOptions);
 
-        if (!hist || hist.length === 0) {
+        if (!result || result.length === 0) {
             log(`[Fetch] Warning: No data returned for ${symbol}.`);
             return null;
         }
 
-        log(`[Fetch] Received ${hist.length} data points for ${symbol}.`);
+        log(`[Fetch] Received ${result.length} data points for ${symbol}.`);
 
         const prices = {};
-        hist.forEach(item => {
+        result.forEach(item => {
             prices[item.date.toISOString().split('T')[0]] = item.close;
         });
 
+        const dividends = {};
+        if (result.dividends) {
+            result.dividends.forEach(item => {
+                dividends[item.date.toISOString().split('T')[0]] = item.amount;
+            });
+        }
+
         const payload = {
             prices: prices,
-            splits: {}, // We no longer store splits from yfinance
-            dividends: (hist.dividends || []).reduce((acc, d) => ({ ...acc, [d.date.toISOString().split('T')[0]]: d.amount }), {}),
+            splits: {}, // We continue to use user-defined splits
+            dividends: dividends,
             lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            dataSource: 'emergency-fetch-user-split-model-v2'
+            dataSource: 'emergency-fetch-user-split-model-v3'
         };
 
         if (symbol === 'TWD=X') {
