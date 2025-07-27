@@ -53,8 +53,18 @@ async function performRecalculation(userId) {
         log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}, XIRR: ${xirr}`);
 
         log("Saving results...");
+
+        // Prepare the final data, ensuring the trigger field is removed to prevent loops
+        const finalData = { 
+            holdings, 
+            totalRealizedPL, 
+            xirr, 
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            force_recalc_timestamp: admin.firestore.FieldValue.delete() // Remove the trigger field
+        };
+
         await Promise.all([
-            holdingsDocRef.set({ holdings, totalRealizedPL, xirr, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+            holdingsDocRef.set(finalData, { merge: true }), // Use merge to avoid race conditions
             historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
         ]);
         log("--- Recalculation finished successfully! ---");
@@ -71,25 +81,34 @@ async function performRecalculation(userId) {
 // === Firestore Triggers ========================================================
 // =================================================================================
 
-// Trigger for Transaction changes
-exports.recalculateOnTransaction = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+// This is the primary trigger for all recalculations.
+exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+    .document("users/{userId}/user_data/current_holdings")
+    .onUpdate(async (change, context) => {
+        const before = change.before.data();
+        const after = change.after.data();
+
+        // Check if the update was triggered by our daily script
+        if (after.force_recalc_timestamp && before.force_recalc_timestamp !== after.force_recalc_timestamp) {
+            console.log(`Recalculation forced for user ${context.params.userId} by daily update.`);
+            await performRecalculation(context.params.userId);
+        }
+    });
+
+// Trigger for Transaction changes (now just a passthrough to the main trigger)
+exports.recalculateOnTransaction = functions.firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
-        await performRecalculation(context.params.userId);
+        const holdingsRef = db.doc(`users/${context.params.userId}/user_data/current_holdings`);
+        await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() });
     });
 
-// NEW: Trigger for Split changes
-exports.recalculateOnSplit = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+// Trigger for Split changes (now just a passthrough to the main trigger)
+exports.recalculateOnSplit = functions.firestore
     .document("users/{userId}/splits/{splitId}")
     .onWrite(async (change, context) => {
-        await performRecalculation(context.params.userId);
-    });
-
-
-exports.recalculateOnDemand = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
-    .document("users/{userId}/user_data/recalculation_trigger")
-    .onWrite(async (change, context) => {
-        await performRecalculation(context.params.userId);
+        const holdingsRef = db.doc(`users/${context.params.userId}/user_data/current_holdings`);
+        await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() });
     });
 
 
@@ -294,13 +313,13 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
 
     const finalHoldings = calculateFinalHoldings(portfolio, marketData);
     const portfolioHistory = calculatePortfolioHistory(events, marketData);
-    const cashflows = createCashflows(events, finalHoldings, marketData);
+    const cashflows = createCashflows(events, portfolio, finalHoldings, marketData);
     const xirr = calculateXIRR(cashflows);
 
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory, xirr };
 }
 
-function createCashflows(events, finalHoldings, marketData) {
+function createCashflows(events, portfolio, finalHoldings, marketData) {
     const cashflows = [];
 
     // Add buy/sell transactions to cashflows
@@ -319,12 +338,17 @@ function createCashflows(events, finalHoldings, marketData) {
     events.filter(e => e.eventType === 'dividend').forEach(d => {
         const rateHistory = marketData["TWD=X"]?.rates || {};
         const rateOnDate = findNearestDataPoint(rateHistory, d.date);
-        const amount = d.amount * (marketData[d.symbol]?.currency === 'USD' ? rateOnDate : 1);
+        // Correctly get the currency from the portfolio state at that time
+        const holdingCurrency = portfolio[d.symbol]?.currency || 'USD'; 
+        const totalSharesOnDate = portfolio[d.symbol]?.lots.reduce((sum, lot) => sum + lot.quantity, 0) || 0;
+        const amount = d.amount * totalSharesOnDate * (holdingCurrency === 'USD' ? rateOnDate : 1);
 
-        cashflows.push({
-            date: new Date(d.date),
-            amount: amount
-        });
+        if (amount > 0) {
+            cashflows.push({
+                date: new Date(d.date),
+                amount: amount
+            });
+        }
     });
 
     // Add current market value as the final cashflow
