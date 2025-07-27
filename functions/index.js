@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final, complete, and audited version of the Cloud Function.
+// Final, complete, and simplified version based on the original price model.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -15,13 +15,12 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
 
         const log = (message) => {
             const timestamp = new Date().toISOString();
-            const logEntry = `${timestamp}: ${message}`;
-            console.log(logEntry);
-            logs.push(logEntry);
+            logs.push(`${timestamp}: ${message}`);
+            console.log(`${timestamp}: ${message}`);
         };
 
         try {
-            log("--- Recalculation triggered (v15 - Complete Code) ---");
+            log("--- Recalculation triggered (v17 - Simplified Engine) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -30,7 +29,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
             const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
             if (transactions.length === 0) {
-                log("No transactions found. Clearing all portfolio data.");
+                log("No transactions found. Clearing data.");
                 await Promise.all([
                     holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
                     historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
@@ -40,19 +39,18 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
 
             const marketData = await getMarketDataFromDb(transactions, log);
 
-            log(`Final check before calculation. Is marketData defined? ${!!marketData}. Object keys: ${Object.keys(marketData)}`);
             if (!marketData || Object.keys(marketData).length === 0) {
-                throw new Error("Market data is empty or undefined after fetch.");
+                throw new Error("Market data is empty after fetch.");
             }
 
-            log("Starting FIFO calculation...");
+            log("Starting simplified FIFO calculation...");
             const result = calculatePortfolio(transactions, marketData, log);
             if (!result) throw new Error("Calculation function returned undefined.");
 
             const { holdings, totalRealizedPL, portfolioHistory } = result;
-            log(`Calculation complete. Found ${Object.keys(holdings).length} holdings. Total Realized P/L: ${totalRealizedPL}`);
+            log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}`);
 
-            log("Saving calculated data to Firestore...");
+            log("Saving results...");
             await Promise.all([
                 holdingsDocRef.set({ holdings, totalRealizedPL, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
                 historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
@@ -60,7 +58,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
             log("--- Recalculation finished successfully! ---");
 
         } catch (error) {
-            console.error("CRITICAL ERROR in recalculateHoldings:", error);
+            console.error("CRITICAL ERROR:", error);
             log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
         } finally {
             await logRef.set({ entries: logs });
@@ -74,10 +72,7 @@ async function getMarketDataFromDb(transactions, log) {
     const marketData = {};
 
     for (const symbol of allSymbols) {
-        const isForex = symbol === "TWD=X";
-        const collectionName = isForex ? "exchange_rates" : "price_history";
-        const docRef = db.collection(collectionName).doc(symbol);
-
+        const docRef = db.collection(symbol === "TWD=X" ? "exchange_rates" : "price_history").doc(symbol);
         const doc = await docRef.get();
 
         if (doc.exists) {
@@ -85,68 +80,64 @@ async function getMarketDataFromDb(transactions, log) {
             marketData[symbol] = doc.data();
         } else {
             log(`Data for ${symbol} not found. Performing emergency fetch...`);
-            const fetchedData = await fetchAndSaveMarketData(symbol, log);
+            const fetchedData = await fetchAndReverseAdjustMarketData(symbol, log);
             if (fetchedData) {
                 marketData[symbol] = fetchedData;
+                await docRef.set(fetchedData);
+                log(`Successfully fetched and saved data for ${symbol}.`);
             }
         }
     }
-
-    log(`Market data preparation complete. Final object has ${Object.keys(marketData).length} keys.`);
     return marketData;
 }
 
-async function fetchAndSaveMarketData(symbol, log) {
+async function fetchAndReverseAdjustMarketData(symbol, log) {
     try {
-        const isForex = symbol === "TWD=X";
-        const collectionName = isForex ? "exchange_rates" : "price_history";
-        const docRef = db.collection(collectionName).doc(symbol);
-
         log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
-        const queryOptions = { period1: '2000-01-01' };
-        const results = await yahooFinance.historical(symbol, queryOptions);
+        const hist = await yahooFinance.historical(symbol, { period1: '2000-01-01', events: 'split,div' });
 
-        if (!results || results.length === 0) {
+        if (!hist || hist.length === 0) {
             log(`[Fetch] Warning: No data returned for ${symbol}.`);
             return null;
         }
 
-        log(`[Fetch] Received ${results.length} data points for ${symbol}. Shaping payload...`);
+        log(`[Fetch] Received ${hist.length} data points for ${symbol}. Reverse-adjusting prices...`);
 
         const prices = {};
-        results.forEach(item => {
-            prices[item.date.toISOString().split('T')[0]] = item.close;
-        });
+        const splits = {};
+        let cumulativeRatio = 1.0;
+
+        const splitEvents = (hist.splits || []).sort((a, b) => b.date - a.date);
+        let splitIndex = 0;
+
+        for (let i = hist.length - 1; i >= 0; i--) {
+            const item = hist[i];
+            const dateStr = item.date.toISOString().split('T')[0];
+
+            if (splitIndex < splitEvents.length && item.date < splitEvents[splitIndex].date) {
+                cumulativeRatio *= splitEvents[splitIndex].numerator / splitEvents[splitIndex].denominator;
+                splits[splitEvents[splitIndex].date.toISOString().split('T')[0]] = splitEvents[splitIndex].numerator / splitEvents[splitIndex].denominator;
+                splitIndex++;
+            }
+            prices[dateStr] = item.close * cumulativeRatio;
+        }
 
         const payload = {
             prices: prices,
+            splits: splits,
+            dividends: (hist.dividends || []).reduce((acc, d) => ({ ...acc, [d.date.toISOString().split('T')[0]]: d.amount }), {}),
             lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            dataSource: 'yahoo-finance2-emergency-fetch-v4',
+            dataSource: 'emergency-fetch-original-price-v2'
         };
 
-        if (isForex) {
-            payload.rates = prices;
+        if (symbol === 'TWD=X') {
+            payload.rates = payload.prices;
             delete payload.prices;
-        } else {
-            const splits = {};
-            (results.splits || []).forEach(item => {
-                splits[item.date.toISOString().split('T')[0]] = item.numerator / item.denominator;
-            });
-            const dividends = {};
-            (results.dividends || []).forEach(item => {
-                dividends[item.date.toISOString().split('T')[0]] = item.amount;
-            });
-            payload.splits = splits;
-            payload.dividends = dividends;
         }
 
-        await docRef.set(payload);
-        log(`[Fetch] Successfully saved emergency data for ${symbol} to Firestore.`);
         return payload;
-
-    } catch (error) {
-        console.error(`ERROR during emergency fetch for ${symbol}:`, error);
-        log(`[Fetch] ERROR for ${symbol}: ${error.message}`);
+    } catch (e) {
+        log(`[Fetch Error] for ${symbol}: ${e.message}`);
         return null;
     }
 }
@@ -160,10 +151,10 @@ function calculatePortfolio(transactions, marketData, log) {
     }
     for (const symbol of symbols) {
         const stockData = marketData[symbol];
-        if (!stockData) {
-            log(`Warning: No market data for ${symbol} in calculation engine. Skipping its dividend events.`);
-            continue;
-        }
+        if (!stockData) continue;
+        Object.entries(stockData.splits || {}).forEach(([date, ratio]) => {
+            events.push({ date: new Date(date), symbol, ratio, eventType: 'split' });
+        });
         Object.entries(stockData.dividends || {}).forEach(([date, amount]) => {
             events.push({ date: new Date(date), symbol, amount, eventType: 'dividend' });
         });
@@ -178,19 +169,12 @@ function calculatePortfolio(transactions, marketData, log) {
     for (const event of events) {
         const eventDate = event.date;
         const symbol = event.symbol.toUpperCase();
-        const stockData = marketData[symbol];
-
-        if (!stockData) {
-            log(`Warning: Skipping event for ${symbol} on ${eventDate.toISOString()} due to missing market data.`);
-            continue;
-        }
 
         if (lastProcessedDate && lastProcessedDate < eventDate) {
             let currentDate = new Date(lastProcessedDate);
             currentDate.setDate(currentDate.getDate() + 1);
             while (currentDate < eventDate) {
-                const dateStr = currentDate.toISOString().split('T')[0];
-                portfolioHistory[dateStr] = calculateDailyMarketValue(portfolio, marketData, currentDate);
+                portfolioHistory[currentDate.toISOString().split('T')[0]] = calculateDailyMarketValue(portfolio, marketData, currentDate);
                 currentDate.setDate(currentDate.getDate() + 1);
             }
         }
@@ -209,16 +193,11 @@ function calculatePortfolio(transactions, marketData, log) {
                 const costPerShareTWD = t.price * (t.currency === 'USD' ? rateOnDate : 1);
 
                 if (t.type === 'buy') {
-                    portfolio[symbol].lots.push({
-                        quantity: t.quantity,
-                        pricePerShareTWD: costPerShareTWD,
-                        date: eventDate
-                    });
+                    portfolio[symbol].lots.push({ quantity: t.quantity, pricePerShareTWD: costPerShareTWD, date: eventDate });
                 } else if (t.type === 'sell') {
                     let sharesToSell = t.quantity;
                     const saleValueTWD = t.quantity * t.price * (t.currency === 'USD' ? rateOnDate : 1);
                     let costOfSoldSharesTWD = 0;
-
                     while (sharesToSell > 0 && portfolio[symbol].lots.length > 0) {
                         const firstLot = portfolio[symbol].lots[0];
                         if (firstLot.quantity <= sharesToSell) {
@@ -235,12 +214,13 @@ function calculatePortfolio(transactions, marketData, log) {
                 }
                 break;
 
-            case 'dividend':
-                let totalSharesOnDividendDay = portfolio[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
-                const futureSplitRatioForDividend = getFutureSplitRatio(stockData.splits, eventDate);
-                totalSharesOnDividendDay *= futureSplitRatioForDividend;
+            case 'split':
+                portfolio[symbol].lots.forEach(lot => { lot.quantity *= event.ratio; });
+                break;
 
-                const dividendTWD = event.amount * totalSharesOnDividendDay * (portfolio[symbol].currency === 'USD' ? rateOnDate : 1);
+            case 'dividend':
+                const totalShares = portfolio[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
+                const dividendTWD = event.amount * totalShares * (portfolio[symbol].currency === 'USD' ? rateOnDate : 1);
                 totalRealizedPL += dividendTWD;
                 break;
         }
@@ -254,8 +234,7 @@ function calculatePortfolio(transactions, marketData, log) {
         currentDate.setDate(currentDate.getDate() + 1);
         const today = new Date();
         while (currentDate <= today) {
-            const dateStr = currentDate.toISOString().split('T')[0];
-            portfolioHistory[dateStr] = calculateDailyMarketValue(portfolio, marketData, currentDate);
+            portfolioHistory[currentDate.toISOString().split('T')[0]] = calculateDailyMarketValue(portfolio, marketData, currentDate);
             currentDate.setDate(currentDate.getDate() + 1);
         }
     }
@@ -294,17 +273,6 @@ function calculatePortfolio(transactions, marketData, log) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
-function getFutureSplitRatio(splits, fromDate) {
-    if (!splits) return 1;
-    let ratio = 1;
-    Object.entries(splits).forEach(([dateStr, splitRatio]) => {
-        if (new Date(dateStr) > fromDate) {
-            ratio *= splitRatio;
-        }
-    });
-    return ratio;
-}
-
 function calculateDailyMarketValue(portfolio, marketData, date) {
     let totalValue = 0;
     const rateOnDate = findNearestDataPoint(marketData["TWD=X"]?.rates || {}, date);
@@ -314,7 +282,8 @@ function calculateDailyMarketValue(portfolio, marketData, date) {
         const totalOriginalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
 
         if (totalOriginalQuantity > 0) {
-            const priceOnDate = findNearestDataPoint(marketData[symbol]?.prices || {}, date);
+            const priceHistory = marketData[symbol]?.prices || {};
+            const priceOnDate = findNearestDataPoint(priceHistory, date);
             const rate = holding.currency === 'USD' ? rateOnDate : 1;
             totalValue += totalOriginalQuantity * priceOnDate * rate;
         }
