@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final version with enhanced robustness for the calculation engine.
+// Final, complete, and audited version of the Cloud Function.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -21,7 +21,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v14 - Final Robustness Fix) ---");
+            log("--- Recalculation triggered (v15 - Complete Code) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -35,18 +35,18 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
                     holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
                     historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
                 ]);
-                return; // Exit early
+                return;
             }
 
             const marketData = await getMarketDataFromDb(transactions, log);
 
             log(`Final check before calculation. Is marketData defined? ${!!marketData}. Object keys: ${Object.keys(marketData)}`);
-            if (!marketData || Object.keys(marketData).length < 2) {
-                throw new Error("Market data is incomplete or undefined after fetch.");
+            if (!marketData || Object.keys(marketData).length === 0) {
+                throw new Error("Market data is empty or undefined after fetch.");
             }
 
-            log("Starting FIFO calculation with on-the-fly adjustment...");
-            const result = calculatePortfolioAdjustOnTheFly(transactions, marketData, log);
+            log("Starting FIFO calculation...");
+            const result = calculatePortfolio(transactions, marketData, log);
             if (!result) throw new Error("Calculation function returned undefined.");
 
             const { holdings, totalRealizedPL, portfolioHistory } = result;
@@ -67,16 +67,94 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         }
     });
 
-// Data fetching logic is now stable and correct.
-async function getMarketDataFromDb(transactions, log) { /* ... */ }
-async function fetchAndSaveMarketData(symbol, log) { /* ... */ }
+async function getMarketDataFromDb(transactions, log) {
+    const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
+    const allSymbols = [...new Set([...symbols, "TWD=X"])];
+    log(`Required symbols: [${allSymbols.join(', ')}]`);
+    const marketData = {};
 
-// **THE FINAL FIX IS HERE: Added robustness checks**
-function calculatePortfolioAdjustOnTheFly(transactions, marketData, log) {
+    for (const symbol of allSymbols) {
+        const isForex = symbol === "TWD=X";
+        const collectionName = isForex ? "exchange_rates" : "price_history";
+        const docRef = db.collection(collectionName).doc(symbol);
+
+        const doc = await docRef.get();
+
+        if (doc.exists) {
+            log(`Found ${symbol} in Firestore.`);
+            marketData[symbol] = doc.data();
+        } else {
+            log(`Data for ${symbol} not found. Performing emergency fetch...`);
+            const fetchedData = await fetchAndSaveMarketData(symbol, log);
+            if (fetchedData) {
+                marketData[symbol] = fetchedData;
+            }
+        }
+    }
+
+    log(`Market data preparation complete. Final object has ${Object.keys(marketData).length} keys.`);
+    return marketData;
+}
+
+async function fetchAndSaveMarketData(symbol, log) {
+    try {
+        const isForex = symbol === "TWD=X";
+        const collectionName = isForex ? "exchange_rates" : "price_history";
+        const docRef = db.collection(collectionName).doc(symbol);
+
+        log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
+        const queryOptions = { period1: '2000-01-01' };
+        const results = await yahooFinance.historical(symbol, queryOptions);
+
+        if (!results || results.length === 0) {
+            log(`[Fetch] Warning: No data returned for ${symbol}.`);
+            return null;
+        }
+
+        log(`[Fetch] Received ${results.length} data points for ${symbol}. Shaping payload...`);
+
+        const prices = {};
+        results.forEach(item => {
+            prices[item.date.toISOString().split('T')[0]] = item.close;
+        });
+
+        const payload = {
+            prices: prices,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            dataSource: 'yahoo-finance2-emergency-fetch-v4',
+        };
+
+        if (isForex) {
+            payload.rates = prices;
+            delete payload.prices;
+        } else {
+            const splits = {};
+            (results.splits || []).forEach(item => {
+                splits[item.date.toISOString().split('T')[0]] = item.numerator / item.denominator;
+            });
+            const dividends = {};
+            (results.dividends || []).forEach(item => {
+                dividends[item.date.toISOString().split('T')[0]] = item.amount;
+            });
+            payload.splits = splits;
+            payload.dividends = dividends;
+        }
+
+        await docRef.set(payload);
+        log(`[Fetch] Successfully saved emergency data for ${symbol} to Firestore.`);
+        return payload;
+
+    } catch (error) {
+        console.error(`ERROR during emergency fetch for ${symbol}:`, error);
+        log(`[Fetch] ERROR for ${symbol}: ${error.message}`);
+        return null;
+    }
+}
+
+function calculatePortfolio(transactions, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
-    // 1. Populate the event timeline
     for (const t of transactions) {
         events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' });
     }
@@ -92,7 +170,6 @@ function calculatePortfolioAdjustOnTheFly(transactions, marketData, log) {
     }
     events.sort((a, b) => a.date - b.date);
 
-    // 2. Process the timeline
     const portfolio = {};
     let totalRealizedPL = 0;
     const portfolioHistory = {};
@@ -103,16 +180,12 @@ function calculatePortfolioAdjustOnTheFly(transactions, marketData, log) {
         const symbol = event.symbol.toUpperCase();
         const stockData = marketData[symbol];
 
-        // **ROBUSTNESS CHECK**
         if (!stockData) {
             log(`Warning: Skipping event for ${symbol} on ${eventDate.toISOString()} due to missing market data.`);
             continue;
         }
 
-        // ... (rest of the logic is the same as the previous correct version)
-        const eventDateStr = eventDate.toISOString().split('T')[0];
-
-        if (lastProcessedDate) {
+        if (lastProcessedDate && lastProcessedDate < eventDate) {
             let currentDate = new Date(lastProcessedDate);
             currentDate.setDate(currentDate.getDate() + 1);
             while (currentDate < eventDate) {
@@ -172,7 +245,7 @@ function calculatePortfolioAdjustOnTheFly(transactions, marketData, log) {
                 break;
         }
         
-        portfolioHistory[eventDateStr] = calculateDailyMarketValue(portfolio, marketData, eventDate);
+        portfolioHistory[eventDate.toISOString().split('T')[0]] = calculateDailyMarketValue(portfolio, marketData, eventDate);
         lastProcessedDate = eventDate;
     }
 
@@ -221,6 +294,63 @@ function calculatePortfolioAdjustOnTheFly(transactions, marketData, log) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
-function getFutureSplitRatio(splits, fromDate) { /* ... */ }
-function calculateDailyMarketValue(portfolio, marketData, date) { /* ... */ }
-function findNearestDataPoint(history, targetDate) { /* ... */ }
+function getFutureSplitRatio(splits, fromDate) {
+    if (!splits) return 1;
+    let ratio = 1;
+    Object.entries(splits).forEach(([dateStr, splitRatio]) => {
+        if (new Date(dateStr) > fromDate) {
+            ratio *= splitRatio;
+        }
+    });
+    return ratio;
+}
+
+function calculateDailyMarketValue(portfolio, marketData, date) {
+    let totalValue = 0;
+    const rateOnDate = findNearestDataPoint(marketData["TWD=X"]?.rates || {}, date);
+
+    for (const symbol in portfolio) {
+        const holding = portfolio[symbol];
+        const totalOriginalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+
+        if (totalOriginalQuantity > 0) {
+            const priceOnDate = findNearestDataPoint(marketData[symbol]?.prices || {}, date);
+            const rate = holding.currency === 'USD' ? rateOnDate : 1;
+            totalValue += totalOriginalQuantity * priceOnDate * rate;
+        }
+    }
+    return totalValue;
+}
+
+function findNearestDataPoint(history, targetDate) {
+    if (!history || Object.keys(history).length === 0) return 1;
+
+    const d = new Date(targetDate);
+    d.setUTCHours(12, 0, 0, 0);
+
+    for (let i = 0; i < 7; i++) {
+        const searchDate = new Date(d);
+        searchDate.setDate(searchDate.getDate() - i);
+        const dateStr = searchDate.toISOString().split('T')[0];
+        if (history[dateStr] !== undefined) {
+            return history[dateStr];
+        }
+    }
+
+    const sortedDates = Object.keys(history).sort();
+    const targetDateStr = d.toISOString().split('T')[0];
+    let closestDate = null;
+    for (const dateStr of sortedDates) {
+        if (dateStr <= targetDateStr) {
+            closestDate = dateStr;
+        } else {
+            break;
+        }
+    }
+    if (closestDate) {
+        return history[closestDate];
+    }
+
+    console.warn(`Could not find any historical data point for date: ${targetDateStr}`);
+    return 1;
+}
