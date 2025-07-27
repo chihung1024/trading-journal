@@ -321,45 +321,66 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory, xirr };
 }
 
-function createCashflows(events, portfolio, finalHoldings, marketData) {
+function createCashflows(events, marketData) {
     const cashflows = [];
+    const portfolioStateForDividends = {}; // Track portfolio state just for dividends
 
-    // Add buy/sell transactions to cashflows
-    events.filter(e => e.eventType === 'transaction').forEach(t => {
-        const rateHistory = marketData["TWD=X"]?.rates || {};
-        const rateOnDate = findNearestDataPoint(rateHistory, t.date);
-        const amount = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
+    // Chronologically process events to build up portfolio state for dividend calculation
+    const sortedEvents = [...events].sort((a, b) => new Date(a.date) - new Date(b.date));
 
-        cashflows.push({
-            date: new Date(t.date),
-            amount: t.type === 'buy' ? -amount : amount
-        });
-    });
-
-    // Add dividends to cashflows
-    events.filter(e => e.eventType === 'dividend').forEach(d => {
-        const rateHistory = marketData["TWD=X"]?.rates || {};
-        const rateOnDate = findNearestDataPoint(rateHistory, d.date);
-        // Correctly get the currency from the portfolio state at that time
-        const holdingCurrency = portfolio[d.symbol]?.currency || 'USD'; 
-        const totalSharesOnDate = portfolio[d.symbol]?.lots.reduce((sum, lot) => sum + lot.quantity, 0) || 0;
-        const amount = d.amount * totalSharesOnDate * (holdingCurrency === 'USD' ? rateOnDate : 1);
-
-        if (amount > 0) {
-            cashflows.push({
-                date: new Date(d.date),
-                amount: amount
-            });
+    for (const event of sortedEvents) {
+        const symbol = event.symbol.toUpperCase();
+        if (!portfolioStateForDividends[symbol]) {
+            portfolioStateForDividends[symbol] = { lots: [], currency: 'USD' };
         }
-    });
 
-    // Add current market value as the final cashflow
-    const totalMarketValue = Object.values(finalHoldings).reduce((sum, h) => sum + h.marketValueTWD, 0);
-    if (totalMarketValue > 0) {
-        cashflows.push({
-            date: new Date(),
-            amount: totalMarketValue
-        });
+        switch (event.eventType) {
+            case 'transaction':
+                const t = event;
+                portfolioStateForDividends[symbol].currency = t.currency;
+                const rateHistory = marketData["TWD=X"]?.rates || {};
+                const rateOnDate = findNearestDataPoint(rateHistory, t.date);
+                const amount = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
+                cashflows.push({ date: new Date(t.date), amount: t.type === 'buy' ? -amount : amount });
+
+                if (t.type === 'buy') {
+                    portfolioStateForDividends[symbol].lots.push({ quantity: t.quantity });
+                } else if (t.type === 'sell') {
+                    let sharesToSell = t.quantity;
+                    while (sharesToSell > 0 && portfolioStateForDividends[symbol].lots.length > 0) {
+                        const firstLot = portfolioStateForDividends[symbol].lots[0];
+                        if (firstLot.quantity <= sharesToSell) {
+                            sharesToSell -= firstLot.quantity;
+                            portfolioStateForDividends[symbol].lots.shift();
+                        } else {
+                            firstLot.quantity -= sharesToSell;
+                            sharesToSell = 0;
+                        }
+                    }
+                }
+                break;
+
+            case 'split':
+                portfolioStateForDividends[symbol].lots.forEach(lot => { lot.quantity *= event.ratio; });
+                break;
+
+            case 'dividend':
+                const divRateHistory = marketData["TWD=X"]?.rates || {};
+                const divRateOnDate = findNearestDataPoint(divRateHistory, event.date);
+                const holdingCurrency = portfolioStateForDividends[symbol]?.currency || 'USD';
+                const totalSharesOnDate = portfolioStateForDividends[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
+                const dividendAmount = event.amount * totalSharesOnDate * (holdingCurrency === 'USD' ? divRateOnDate : 1);
+                if (dividendAmount > 0) {
+                    cashflows.push({ date: new Date(event.date), amount: dividendAmount });
+                }
+                break;
+        }
+    }
+
+    // Add final market value as the last cashflow
+    const finalMarketValue = Object.values(calculateFinalHoldings(portfolioStateForDividends, marketData)).reduce((sum, h) => sum + h.marketValueTWD, 0);
+    if (finalMarketValue > 0) {
+        cashflows.push({ date: new Date(), amount: finalMarketValue });
     }
 
     return cashflows;
