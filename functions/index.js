@@ -86,6 +86,13 @@ exports.recalculateOnSplit = functions.runWith({ timeoutSeconds: 300, memory: '1
     });
 
 
+exports.recalculateOnDemand = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+    .document("users/{userId}/user_data/recalculation_trigger")
+    .onWrite(async (change, context) => {
+        await performRecalculation(context.params.userId);
+    });
+
+
 // =================================================================================
 // === Data Fetching and Processing Functions (Unchanged) ========================
 // =================================================================================
@@ -334,9 +341,10 @@ function createCashflows(events, finalHoldings, marketData) {
 
 function calculatePortfolioHistory(events, marketData) {
     const portfolioHistory = {};
-    if (events.length === 0) return {};
+    const transactionEvents = events.filter(e => e.eventType === 'transaction');
+    if (transactionEvents.length === 0) return {};
     
-    const firstDate = new Date(events[0].date);
+    const firstDate = new Date(transactionEvents[0].date);
     const today = new Date();
     let currentDate = new Date(firstDate);
     currentDate.setUTCHours(0, 0, 0, 0);
