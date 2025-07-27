@@ -100,7 +100,8 @@ exports.recalculateOnTransaction = functions.firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
         const holdingsRef = db.doc(`users/${context.params.userId}/user_data/current_holdings`);
-        await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() });
+        // Use set with merge to create the doc if it doesn't exist, or update it if it does.
+        await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     });
 
 // Trigger for Split changes (now just a passthrough to the main trigger)
@@ -108,7 +109,8 @@ exports.recalculateOnSplit = functions.firestore
     .document("users/{userId}/splits/{splitId}")
     .onWrite(async (change, context) => {
         const holdingsRef = db.doc(`users/${context.params.userId}/user_data/current_holdings`);
-        await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() });
+        // Use set with merge for robustness.
+        await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     });
 
 
