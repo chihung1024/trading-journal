@@ -85,15 +85,41 @@ def get_all_user_ids(db):
     print(f"Found {len(user_ids)} unique users: {list(user_ids)}")
     return list(user_ids)
 
+import google.auth
+import google.auth.transport.requests
+import requests
+
 def trigger_recalculation_for_users(db, user_ids):
+    print("Preparing to trigger recalculation via HTTP...")
+    
+    # Get default credentials from the environment
+    creds, project_id = google.auth.default()
+    
+    # Get the ID token
+    auth_req = google.auth.transport.requests.Request()
+    creds.refresh(auth_req)
+    id_token = creds.id_token
+
+    # Discover the Cloud Functions region and URL
+    # This is a more robust way than hardcoding the URL
+    base_url = f"https://cloudfunctions.googleapis.com/v1/projects/{project_id}/locations/us-central1/functions/recalculatePortfolio"
+    
+    headers = {
+        "Authorization": f"Bearer {id_token}",
+        "Content-Type": "application/json"
+    }
+
     for user_id in user_ids:
+        print(f"Sending trigger for user: {user_id}")
+        data = { "data": { "userId": user_id } }
         try:
-            doc_ref = db.collection("users").document(user_id).collection("user_data").document("current_holdings")
-            # Use set with merge=True to ensure the document is created if it doesn't exist.
-            doc_ref.set({"force_recalc_timestamp": firestore.SERVER_TIMESTAMP}, merge=True)
-            print(f"Successfully triggered recalculation for user: {user_id}")
+            response = requests.post(base_url, headers=headers, json=data, timeout=30)
+            if response.status_code == 200:
+                print(f"Successfully triggered recalculation for {user_id}. Response: {response.text}")
+            else:
+                print(f"Error triggering recalculation for {user_id}. Status: {response.status_code}, Response: {response.text}")
         except Exception as e:
-            print(f"ERROR: Failed to trigger recalculation for user {user_id}. Reason: {e}")
+            print(f"ERROR: Exception while triggering recalculation for {user_id}. Reason: {e}")
 
 if __name__ == "__main__":
     db_client = initialize_firebase()
