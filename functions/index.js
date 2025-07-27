@@ -215,7 +215,11 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
                 break;
 
             case 'split':
-                portfolio[symbol].lots.forEach(lot => { lot.quantity *= event.ratio; });
+                portfolio[symbol].lots.forEach(lot => { 
+                    lot.quantity *= event.ratio;
+                    lot.pricePerShareOriginal /= event.ratio;
+                    lot.pricePerShareTWD /= event.ratio;
+                });
                 break;
 
             case 'dividend':
