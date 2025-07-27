@@ -10,9 +10,13 @@ def initialize_firebase():
     try:
         get_app()
     except ValueError:
-        service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
-        cred = credentials.Certificate(service_account_info)
-        firebase_admin.initialize_app(cred)
+        try:
+            service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
+            cred = credentials.Certificate(service_account_info)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            print(f"Firebase initialization failed: {e}")
+            exit(1)
     return firestore.client()
 
 def get_all_symbols_from_transactions(db):
@@ -35,7 +39,6 @@ def fetch_and_update_market_data(db, symbols):
         print(f"--- Processing: {symbol} ---")
         try:
             stock = yf.Ticker(symbol)
-            # Fetch data with splits and dividends, but without price adjustments
             hist = stock.history(start="2000-01-01", interval="1d", auto_adjust=False, back_adjust=False)
             
             if hist.empty:
@@ -46,11 +49,9 @@ def fetch_and_update_market_data(db, symbols):
             prices_df = hist[['Close']].copy()
             splits_df = stock.splits
 
-            # Ensure timezone is not present for comparison
             prices_df.index = prices_df.index.tz_localize(None)
             splits_df.index = splits_df.index.tz_localize(None)
 
-            # Sort descending to iterate from present to past
             prices_df.sort_index(ascending=False, inplace=True)
             splits_df.sort_index(ascending=False, inplace=True)
 
@@ -59,14 +60,12 @@ def fetch_and_update_market_data(db, symbols):
             
             for i in range(len(prices_df)):
                 current_date = prices_df.index[i]
-                # Apply split ratio that happened *after* the current price date
-                if split_iloc < len(splits_df) and current_date < splits_df.index[split_iloc]:
+                while split_iloc < len(splits_df) and current_date < splits_df.index[split_iloc]:
                     cumulative_ratio *= splits_df.iloc[split_iloc]
                     split_iloc += 1
                 
                 prices_df.iloc[i, 0] = prices_df.iloc[i, 0] * cumulative_ratio
 
-            # Sort back to chronological order
             prices_df.sort_index(ascending=True, inplace=True)
             original_prices = {idx.strftime('%Y-%m-%d'): val for idx, val in prices_df['Close'].items() if not pd.isna(val)}
 
@@ -81,7 +80,7 @@ def fetch_and_update_market_data(db, symbols):
                 "splits": {idx.strftime('%Y-%m-%d'): val for idx, val in splits_df.items()},
                 "dividends": {idx.strftime('%Y-%m-%d'): val for idx, val in dividends.items()} if dividends is not None else {},
                 "lastUpdated": datetime.now().isoformat(),
-                "dataSource": "yfinance-original-price-model-v2"
+                "dataSource": "yfinance-original-price-model-v3"
             }
             if is_forex:
                 payload["rates"] = payload.pop("prices")
