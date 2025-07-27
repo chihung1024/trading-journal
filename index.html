@@ -233,6 +233,10 @@
                     const data = docSnap.data();
                     holdings = data.holdings || {};
                     realizedPLFromBackend = data.totalRealizedPL || 0;
+                    const xirr = data.xirr || 0;
+                    const xirrEl = document.getElementById('xirr-value');
+                    xirrEl.textContent = `${(xirr * 100).toFixed(2)}%`;
+                    xirrEl.className = `text-3xl font-bold mt-2 ${xirr >= 0 ? 'text-red-600' : 'text-green-600'}`;
                 } else {
                     holdings = {};
                     realizedPLFromBackend = 0;
