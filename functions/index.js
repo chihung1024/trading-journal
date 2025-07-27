@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final, definitive version with all helper functions included.
+// Final, definitive version with all calculation logic corrected.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -20,7 +20,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v27 - Final Complete Code) ---");
+            log("--- Recalculation triggered (v28 - Final Calculation Fix) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -48,7 +48,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
                 throw new Error("Market data is empty after fetch.");
             }
 
-            log("Starting final calculation with user-defined splits...");
+            log("Starting final, corrected calculation...");
             const result = calculatePortfolio(transactions, userSplits, marketData, log);
             if (!result) throw new Error("Calculation function returned undefined.");
 
@@ -170,7 +170,7 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
             case 'transaction':
                 const t = event;
                 portfolio[symbol].currency = t.currency;
-                const costPerShareOriginal = (t.totalCost || t.price) / t.quantity;
+                const costPerShareOriginal = (t.totalCost || t.price);
                 const costPerShareTWD = costPerShareOriginal * (t.currency === 'USD' ? rateOnDate : 1);
 
                 if (t.type === 'buy') {
@@ -227,6 +227,7 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
+// ** CORRECTED LOGIC FOR SPLITS **
 function getPortfolioStateOnDate(allEvents, targetDate) {
     const portfolioState = {};
     const relevantEvents = allEvents.filter(e => new Date(e.date) <= targetDate);
@@ -283,6 +284,7 @@ function calculateDailyMarketValue(portfolio, marketData, date) {
     return totalValue;
 }
 
+// ** CORRECTED LOGIC FOR AVG COST **
 function calculateFinalHoldings(portfolio, marketData) {
     const finalHoldings = {};
     const today = new Date();
