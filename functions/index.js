@@ -50,8 +50,8 @@ async function runRecalculation(userId, log) {
     log("--- Recalculation finished successfully! ---");
 }
 
-// Trigger 1: On transaction change
-exports.recalculateOnTransactionChange = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+// ** RENAMED TO MATCH EXISTING FUNCTION IN FIREBASE **
+exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
         const { userId } = context.params;
@@ -73,28 +73,28 @@ exports.recalculateOnTransactionChange = functions.runWith({ timeoutSeconds: 300
         }
     });
 
-// Trigger 2: On split event change
-exports.recalculateOnSplitChange = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
-    .document("users/{userId}/splits/{splitId}")
-    .onWrite(async (change, context) => {
-        const { userId } = context.params;
-        const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
-        const logs = [];
-        const log = (message) => {
-            const timestamp = new Date().toISOString();
-            logs.push(`${timestamp}: ${message}`);
-            console.log(`${timestamp}: ${message}`);
-        };
+// You can manually create this trigger in the Firebase console if needed.
+// exports.recalculateOnSplitChange = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+//     .document("users/{userId}/splits/{splitId}")
+//     .onWrite(async (change, context) => {
+//         const { userId } = context.params;
+//         const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
+//         const logs = [];
+//         const log = (message) => {
+//             const timestamp = new Date().toISOString();
+//             logs.push(`${timestamp}: ${message}`);
+//             console.log(`${timestamp}: ${message}`);
+//         };
 
-        try {
-            await runRecalculation(userId, log);
-        } catch (error) {
-            console.error("CRITICAL ERROR:", error);
-            log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
-        } finally {
-            await logRef.set({ entries: logs });
-        }
-    });
+//         try {
+//             await runRecalculation(userId, log);
+//         } catch (error) {
+//             console.error("CRITICAL ERROR:", error);
+//             log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
+//         } finally {
+//             await logRef.set({ entries: logs });
+//         }
+//     });
 
 
 // --- HELPER FUNCTIONS ---
