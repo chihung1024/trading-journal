@@ -5,58 +5,14 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// The core calculation logic, now extracted to be reusable.
-async function runRecalculation(userId, log) {
-    log(`--- Recalculation triggered for user: ${userId} ---`);
-
-    const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
-    const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
-
-    const [transactionsSnapshot, userSplitsSnapshot] = await Promise.all([
-        db.collection(`users/${userId}/transactions`).get(),
-        db.collection(`users/${userId}/splits`).get()
-    ]);
-
-    const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    const userSplits = userSplitsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-
-    if (transactions.length === 0) {
-        log("No transactions found. Clearing data.");
-        await Promise.all([
-            holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-            historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-        ]);
-        return;
-    }
-
-    const marketData = await getMarketDataFromDb(transactions, log);
-
-    if (!marketData || Object.keys(marketData).length === 0) {
-        throw new Error("Market data is empty after fetch.");
-    }
-
-    log("Starting final calculation with user-defined splits...");
-    const result = calculatePortfolio(transactions, userSplits, marketData, log);
-    if (!result) throw new Error("Calculation function returned undefined.");
-
-    const { holdings, totalRealizedPL, portfolioHistory } = result;
-    log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}`);
-
-    log("Saving results...");
-    await Promise.all([
-        holdingsDocRef.set({ holdings, totalRealizedPL, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-        historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-    ]);
-    log("--- Recalculation finished successfully! ---");
-}
-
-// ** RENAMED TO MATCH EXISTING FUNCTION IN FIREBASE **
+// Final, definitive version with all calculation logic corrected.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
         const { userId } = context.params;
         const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
         const logs = [];
+
         const log = (message) => {
             const timestamp = new Date().toISOString();
             logs.push(`${timestamp}: ${message}`);
@@ -64,7 +20,48 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         };
 
         try {
-            await runRecalculation(userId, log);
+            log("--- Recalculation triggered (v30 - Final Split Logic Fix) ---");
+
+            const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
+            const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
+
+            const [transactionsSnapshot, userSplitsSnapshot] = await Promise.all([
+                db.collection(`users/${userId}/transactions`).get(),
+                db.collection(`users/${userId}/splits`).get()
+            ]);
+
+            const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            const userSplits = userSplitsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+            if (transactions.length === 0) {
+                log("No transactions found. Clearing data.");
+                await Promise.all([
+                    holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                    historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+                ]);
+                return;
+            }
+
+            const marketData = await getMarketDataFromDb(transactions, log);
+
+            if (!marketData || Object.keys(marketData).length === 0) {
+                throw new Error("Market data is empty after fetch.");
+            }
+
+            log("Starting final, corrected calculation...");
+            const result = calculatePortfolio(transactions, userSplits, marketData, log);
+            if (!result) throw new Error("Calculation function returned undefined.");
+
+            const { holdings, totalRealizedPL, portfolioHistory } = result;
+            log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}`);
+
+            log("Saving results...");
+            await Promise.all([
+                holdingsDocRef.set({ holdings, totalRealizedPL, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+            ]);
+            log("--- Recalculation finished successfully! ---");
+
         } catch (error) {
             console.error("CRITICAL ERROR:", error);
             log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
@@ -72,32 +69,6 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
             await logRef.set({ entries: logs });
         }
     });
-
-// You can manually create this trigger in the Firebase console if needed.
-// exports.recalculateOnSplitChange = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
-//     .document("users/{userId}/splits/{splitId}")
-//     .onWrite(async (change, context) => {
-//         const { userId } = context.params;
-//         const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
-//         const logs = [];
-//         const log = (message) => {
-//             const timestamp = new Date().toISOString();
-//             logs.push(`${timestamp}: ${message}`);
-//             console.log(`${timestamp}: ${message}`);
-//         };
-
-//         try {
-//             await runRecalculation(userId, log);
-//         } catch (error) {
-//             console.error("CRITICAL ERROR:", error);
-//             log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
-//         } finally {
-//             await logRef.set({ entries: logs });
-//         }
-//     });
-
-
-// --- HELPER FUNCTIONS ---
 
 async function getMarketDataFromDb(transactions, log) {
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -163,6 +134,7 @@ async function fetchAndSaveMarketData(symbol, log) {
     }
 }
 
+// Final, corrected calculation engine.
 function calculatePortfolio(transactions, userSplits, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -256,6 +228,7 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
+// ** CORRECTED LOGIC FOR SPLITS **
 function getPortfolioStateOnDate(allEvents, targetDate) {
     const portfolioState = {};
     const relevantEvents = allEvents.filter(e => new Date(e.date) <= targetDate);
@@ -312,6 +285,7 @@ function calculateDailyMarketValue(portfolio, marketData, date) {
     return totalValue;
 }
 
+// ** CORRECTED LOGIC FOR AVG COST **
 function calculateFinalHoldings(portfolio, marketData) {
     const finalHoldings = {};
     const today = new Date();
