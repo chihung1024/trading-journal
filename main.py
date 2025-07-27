@@ -32,6 +32,8 @@ def get_all_symbols_from_transactions(db):
     print(f"Found {len(all_symbols)} unique symbols: {list(all_symbols)}")
     return list(all_symbols)
 
+# Simplified data fetcher. It no longer performs reverse adjustments.
+# It fetches and stores the split-adjusted prices directly from yfinance.
 def fetch_and_update_market_data(db, symbols):
     all_symbols_to_update = list(set(symbols + ["TWD=X"]))
     
@@ -39,66 +41,40 @@ def fetch_and_update_market_data(db, symbols):
         print(f"--- Processing: {symbol} ---")
         try:
             stock = yf.Ticker(symbol)
+            # auto_adjust=False gives split-adjusted prices and separate split/dividend data.
             hist = stock.history(start="2000-01-01", interval="1d", auto_adjust=False, back_adjust=False)
             
             if hist.empty:
                 print(f"Warning: No history found for {symbol}.")
                 continue
 
-            # --- Reverse-adjust prices to get original historical prices ---
-            prices_df = hist[['Close']].copy()
-            splits_df = stock.splits
+            prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if not pd.isna(val)}
+            splits = {idx.strftime('%Y-%m-%d'): val for idx, val in stock.splits.items()}
+            dividends = {idx.strftime('%Y-%m-%d'): val for idx, val in stock.dividends.items()}
 
-            if not prices_df.index.tz:
-                prices_df.index = prices_df.index.tz_localize('UTC')
-            if not splits_df.index.tz:
-                splits_df.index = splits_df.index.tz_localize('UTC')
-
-            prices_df.index = prices_df.index.tz_convert(None)
-            splits_df.index = splits_df.index.tz_convert(None)
-
-            prices_df.sort_index(ascending=False, inplace=True)
-            splits_df.sort_index(ascending=False, inplace=True)
-
-            cumulative_ratio = 1.0
-            split_iloc = 0
-            
-            for i in range(len(prices_df)):
-                current_date = prices_df.index[i]
-                while split_iloc < len(splits_df) and current_date < splits_df.index[split_iloc]:
-                    cumulative_ratio *= splits_df.iloc[split_iloc]
-                    split_iloc += 1
-                
-                prices_df.iloc[i, 0] = prices_df.iloc[i, 0] * cumulative_ratio
-
-            prices_df.sort_index(ascending=True, inplace=True)
-            original_prices = {idx.strftime('%Y-%m-%d'): val for idx, val in prices_df['Close'].items() if not pd.isna(val)}
-
-            # --- Prepare final payload ---
-            dividends = stock.dividends
             is_forex = symbol == "TWD=X"
             collection_name = "exchange_rates" if is_forex else "price_history"
             doc_ref = db.collection(collection_name).document(symbol)
 
             payload = {
-                "prices": original_prices,
-                "splits": {idx.strftime('%Y-%m-%d'): val for idx, val in splits_df.items()},
-                "dividends": {idx.strftime('%Y-%m-%d'): val for idx, val in dividends.items()} if dividends is not None else {},
+                "prices": prices,
+                "splits": splits,
+                "dividends": dividends,
                 "lastUpdated": datetime.now().isoformat(),
-                "dataSource": "yfinance-original-price-model-v4"
+                "dataSource": "yfinance-split-adjusted-v1"
             }
             if is_forex:
                 payload["rates"] = payload.pop("prices")
 
             doc_ref.set(payload)
-            print(f"Successfully wrote original price data for {symbol} to Firestore.")
+            print(f"Successfully wrote split-adjusted price data for {symbol} to Firestore.")
 
         except Exception as e:
             print(f"ERROR: Failed to process data for {symbol}. Reason: {e}")
 
 if __name__ == "__main__":
     db_client = initialize_firebase()
-    print("Starting market data update script...")
+    print("Starting market data update script (Simplified Model)...")
     symbols = get_all_symbols_from_transactions(db_client)
     if symbols:
         fetch_and_update_market_data(db_client, symbols)
