@@ -88,8 +88,8 @@ def get_all_user_ids(db):
 def trigger_recalculation_for_users(db, user_ids):
     for user_id in user_ids:
         try:
-            doc_ref = db.collection("users").document(user_id).collection("user_data").document("recalculation_trigger")
-            doc_ref.set({"last_triggered": firestore.SERVER_TIMESTAMP})
+            doc_ref = db.collection("users").document(user_id).collection("user_data").document("current_holdings")
+            doc_ref.update({"force_recalc_timestamp": firestore.SERVER_TIMESTAMP})
             print(f"Successfully triggered recalculation for user: {user_id}")
         except Exception as e:
             print(f"ERROR: Failed to trigger recalculation for user {user_id}. Reason: {e}")
