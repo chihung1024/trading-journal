@@ -5,70 +5,90 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final, definitive version with all calculation logic corrected.
-exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+// =================================================================================
+// === Core Calculation Logic (Refactored to be reusable) ========================
+// =================================================================================
+async function performRecalculation(userId) {
+    const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
+    const logs = [];
+    const log = (message) => {
+        const timestamp = new Date().toISOString();
+        logs.push(`${timestamp}: ${message}`);
+        console.log(`[${userId}] ${timestamp}: ${message}`);
+    };
+
+    try {
+        log("--- Recalculation triggered (v31 - Unified Trigger) ---");
+
+        const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
+        const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
+
+        const [transactionsSnapshot, userSplitsSnapshot] = await Promise.all([
+            db.collection(`users/${userId}/transactions`).get(),
+            db.collection(`users/${userId}/splits`).get()
+        ]);
+
+        const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const userSplits = userSplitsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        if (transactions.length === 0) {
+            log("No transactions found. Clearing data.");
+            await Promise.all([
+                holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+            ]);
+            return;
+        }
+
+        const marketData = await getMarketDataFromDb(transactions, log);
+        if (!marketData || Object.keys(marketData).length === 0) {
+            throw new Error("Market data is empty after fetch.");
+        }
+
+        log("Starting final, corrected calculation...");
+        const result = calculatePortfolio(transactions, userSplits, marketData, log);
+        if (!result) throw new Error("Calculation function returned undefined.");
+
+        const { holdings, totalRealizedPL, portfolioHistory } = result;
+        log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}`);
+
+        log("Saving results...");
+        await Promise.all([
+            holdingsDocRef.set({ holdings, totalRealizedPL, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+            historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+        ]);
+        log("--- Recalculation finished successfully! ---");
+
+    } catch (error) {
+        console.error(`[${userId}] CRITICAL ERROR:`, error);
+        log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
+    } finally {
+        await logRef.set({ entries: logs });
+    }
+}
+
+// =================================================================================
+// === Firestore Triggers ========================================================
+// =================================================================================
+
+// Trigger for Transaction changes
+exports.recalculateOnTransaction = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
-        const { userId } = context.params;
-        const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
-        const logs = [];
-
-        const log = (message) => {
-            const timestamp = new Date().toISOString();
-            logs.push(`${timestamp}: ${message}`);
-            console.log(`${timestamp}: ${message}`);
-        };
-
-        try {
-            log("--- Recalculation triggered (v30 - Final Split Logic Fix) ---");
-
-            const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
-            const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
-
-            const [transactionsSnapshot, userSplitsSnapshot] = await Promise.all([
-                db.collection(`users/${userId}/transactions`).get(),
-                db.collection(`users/${userId}/splits`).get()
-            ]);
-
-            const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            const userSplits = userSplitsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-
-            if (transactions.length === 0) {
-                log("No transactions found. Clearing data.");
-                await Promise.all([
-                    holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-                    historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-                ]);
-                return;
-            }
-
-            const marketData = await getMarketDataFromDb(transactions, log);
-
-            if (!marketData || Object.keys(marketData).length === 0) {
-                throw new Error("Market data is empty after fetch.");
-            }
-
-            log("Starting final, corrected calculation...");
-            const result = calculatePortfolio(transactions, userSplits, marketData, log);
-            if (!result) throw new Error("Calculation function returned undefined.");
-
-            const { holdings, totalRealizedPL, portfolioHistory } = result;
-            log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}`);
-
-            log("Saving results...");
-            await Promise.all([
-                holdingsDocRef.set({ holdings, totalRealizedPL, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-                historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-            ]);
-            log("--- Recalculation finished successfully! ---");
-
-        } catch (error) {
-            console.error("CRITICAL ERROR:", error);
-            log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
-        } finally {
-            await logRef.set({ entries: logs });
-        }
+        await performRecalculation(context.params.userId);
     });
+
+// NEW: Trigger for Split changes
+exports.recalculateOnSplit = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+    .document("users/{userId}/splits/{splitId}")
+    .onWrite(async (change, context) => {
+        await performRecalculation(context.params.userId);
+    });
+
+
+// =================================================================================
+// === Data Fetching and Processing Functions (Unchanged) ========================
+// =================================================================================
 
 async function getMarketDataFromDb(transactions, log) {
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -134,7 +154,6 @@ async function fetchAndSaveMarketData(symbol, log) {
     }
 }
 
-// Final, corrected calculation engine.
 function calculatePortfolio(transactions, userSplits, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -154,7 +173,6 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
     }
     events.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    // --- STAGE 1: Calculate final holdings and total realized P/L ---
     const portfolio = {};
     let totalRealizedPL = 0;
 
@@ -209,26 +227,29 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
     }
 
     const finalHoldings = calculateFinalHoldings(portfolio, marketData);
-
-    // --- STAGE 2: Calculate portfolio history separately ---
-    const portfolioHistory = {};
-    if (events.length > 0) {
-        const firstDate = new Date(events[0].date);
-        const today = new Date();
-        let currentDate = new Date(firstDate);
-        currentDate.setUTCHours(0, 0, 0, 0);
-
-        while (currentDate <= today) {
-            const dailyPortfolioState = getPortfolioStateOnDate(events, currentDate);
-            portfolioHistory[currentDate.toISOString().split('T')[0]] = calculateDailyMarketValue(dailyPortfolioState, marketData, currentDate);
-            currentDate.setDate(currentDate.getDate() + 1);
-        }
-    }
+    const portfolioHistory = calculatePortfolioHistory(events, marketData);
 
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
-// ** CORRECTED LOGIC FOR SPLITS **
+function calculatePortfolioHistory(events, marketData) {
+    const portfolioHistory = {};
+    if (events.length === 0) return {};
+    
+    const firstDate = new Date(events[0].date);
+    const today = new Date();
+    let currentDate = new Date(firstDate);
+    currentDate.setUTCHours(0, 0, 0, 0);
+
+    while (currentDate <= today) {
+        const dateStr = currentDate.toISOString().split('T')[0];
+        const dailyPortfolioState = getPortfolioStateOnDate(events, currentDate);
+        portfolioHistory[dateStr] = calculateDailyMarketValue(dailyPortfolioState, marketData, currentDate);
+        currentDate.setDate(currentDate.getDate() + 1);
+    }
+    return portfolioHistory;
+}
+
 function getPortfolioStateOnDate(allEvents, targetDate) {
     const portfolioState = {};
     const relevantEvents = allEvents.filter(e => new Date(e.date) <= targetDate);
@@ -285,7 +306,6 @@ function calculateDailyMarketValue(portfolio, marketData, date) {
     return totalValue;
 }
 
-// ** CORRECTED LOGIC FOR AVG COST **
 function calculateFinalHoldings(portfolio, marketData) {
     const finalHoldings = {};
     const today = new Date();
