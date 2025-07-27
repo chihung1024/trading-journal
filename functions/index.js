@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final, complete, and audited version of the Cloud Function.
+// Final, definitive version incorporating all user feedback and logic corrections.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -20,7 +20,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v19 - Final Audit) ---");
+            log("--- Recalculation triggered (v20 - Final Architecture) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -43,7 +43,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
                 throw new Error("Market data is empty after fetch.");
             }
 
-            log("Starting simplified FIFO calculation...");
+            log("Starting final FIFO calculation...");
             const result = calculatePortfolio(transactions, marketData, log);
             if (!result) throw new Error("Calculation function returned undefined.");
 
@@ -91,6 +91,7 @@ async function getMarketDataFromDb(transactions, log) {
     return marketData;
 }
 
+// Correctly implements the reverse-adjustment logic for prices.
 async function fetchAndReverseAdjustMarketData(symbol, log) {
     try {
         log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
@@ -146,6 +147,7 @@ async function fetchAndReverseAdjustMarketData(symbol, log) {
     }
 }
 
+// Final, corrected calculation engine.
 function calculatePortfolio(transactions, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -188,20 +190,30 @@ function calculatePortfolio(transactions, marketData, log) {
         }
 
         const rateHistory = marketData["TWD=X"]?.rates || {};
-        const rateOnDate = findNearestDataPoint(rateHistory, eventDate);
-
+        
         switch (event.eventType) {
             case 'transaction':
                 const t = event;
                 portfolio[symbol].currency = t.currency;
-                const costPerShareTWD = t.price * (t.currency === 'USD' ? rateOnDate : 1);
+                
+                const rateOnDate = t.exchangeRate || findNearestDataPoint(rateHistory, eventDate);
+                
+                const totalOriginalCost = t.totalCost || (t.quantity * t.price);
+                const costPerShareOriginal = totalOriginalCost / t.quantity;
+                const costPerShareTWD = costPerShareOriginal * (t.currency === 'USD' ? rateOnDate : 1);
 
                 if (t.type === 'buy') {
-                    portfolio[symbol].lots.push({ quantity: t.quantity, pricePerShareTWD: costPerShareTWD, date: eventDate });
+                    portfolio[symbol].lots.push({ 
+                        quantity: t.quantity, 
+                        pricePerShareTWD: costPerShareTWD, 
+                        pricePerShareOriginal: costPerShareOriginal,
+                        date: eventDate 
+                    });
                 } else if (t.type === 'sell') {
                     let sharesToSell = t.quantity;
-                    const saleValueTWD = t.quantity * t.price * (t.currency === 'USD' ? rateOnDate : 1);
+                    const saleValueTWD = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
                     let costOfSoldSharesTWD = 0;
+
                     while (sharesToSell > 0 && portfolio[symbol].lots.length > 0) {
                         const firstLot = portfolio[symbol].lots[0];
                         if (firstLot.quantity <= sharesToSell) {
@@ -219,12 +231,15 @@ function calculatePortfolio(transactions, marketData, log) {
                 break;
 
             case 'split':
-                portfolio[symbol].lots.forEach(lot => { lot.quantity *= event.ratio; });
+                portfolio[symbol].lots.forEach(lot => { 
+                    lot.quantity *= event.ratio; 
+                });
                 break;
 
             case 'dividend':
                 const totalShares = portfolio[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
-                const dividendTWD = event.amount * totalShares * (portfolio[symbol].currency === 'USD' ? rateOnDate : 1);
+                const dividendRate = findNearestDataPoint(rateHistory, eventDate);
+                const dividendTWD = event.amount * totalShares * (portfolio[symbol].currency === 'USD' ? dividendRate : 1);
                 totalRealizedPL += dividendTWD;
                 break;
         }
@@ -249,24 +264,26 @@ function calculatePortfolio(transactions, marketData, log) {
 
     for (const symbol of Object.keys(portfolio)) {
         const holding = portfolio[symbol];
-        const totalOriginalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+        const totalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
 
-        if (totalOriginalQuantity > 1e-9) {
+        if (totalQuantity > 1e-9) {
             const totalCostTWD = holding.lots.reduce((sum, lot) => sum + (lot.quantity * lot.pricePerShareTWD), 0);
+            const totalCostOriginal = holding.lots.reduce((sum, lot) => sum + (lot.quantity * lot.pricePerShareOriginal), 0);
+
             const priceHistory = marketData[symbol]?.prices || {};
-            const latestPrice = findNearestDataPoint(priceHistory, today);
+            const latestPriceOriginal = findNearestDataPoint(priceHistory, today);
             const rate = holding.currency === 'USD' ? latestRate : 1;
             
-            const marketValueTWD = totalOriginalQuantity * latestPrice * rate;
+            const marketValueTWD = totalQuantity * latestPriceOriginal * rate;
             const unrealizedPLTWD = marketValueTWD - totalCostTWD;
 
             finalHoldings[symbol] = {
                 symbol: symbol,
-                quantity: totalOriginalQuantity,
+                quantity: totalQuantity,
+                avgCostOriginal: totalCostOriginal > 0 ? totalCostOriginal / totalQuantity : 0,
                 totalCostTWD: totalCostTWD,
-                avgCost: totalCostTWD > 0 ? totalCostTWD / totalOriginalQuantity : 0,
                 currency: holding.currency,
-                currentPrice: latestPrice,
+                currentPriceOriginal: latestPriceOriginal,
                 marketValueTWD: marketValueTWD,
                 unrealizedPLTWD: unrealizedPLTWD,
                 returnRate: totalCostTWD > 0 ? (unrealizedPLTWD / totalCostTWD) * 100 : 0,
@@ -283,13 +300,13 @@ function calculateDailyMarketValue(portfolio, marketData, date) {
 
     for (const symbol in portfolio) {
         const holding = portfolio[symbol];
-        const totalOriginalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+        const totalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
 
-        if (totalOriginalQuantity > 0) {
+        if (totalQuantity > 0) {
             const priceHistory = marketData[symbol]?.prices || {};
             const priceOnDate = findNearestDataPoint(priceHistory, date);
             const rate = holding.currency === 'USD' ? rateOnDate : 1;
-            totalValue += totalOriginalQuantity * priceOnDate * rate;
+            totalValue += totalQuantity * priceOnDate * rate;
         }
     }
     return totalValue;
