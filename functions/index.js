@@ -49,12 +49,12 @@ async function performRecalculation(userId) {
         const result = calculatePortfolio(transactions, userSplits, marketData, log);
         if (!result) throw new Error("Calculation function returned undefined.");
 
-        const { holdings, totalRealizedPL, portfolioHistory } = result;
-        log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}`);
+        const { holdings, totalRealizedPL, portfolioHistory, xirr } = result;
+        log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}, XIRR: ${xirr}`);
 
         log("Saving results...");
         await Promise.all([
-            holdingsDocRef.set({ holdings, totalRealizedPL, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+            holdingsDocRef.set({ holdings, totalRealizedPL, xirr, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
             historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
         ]);
         log("--- Recalculation finished successfully! ---");
@@ -154,6 +154,61 @@ async function fetchAndSaveMarketData(symbol, log) {
     }
 }
 
+function calculateXIRR(cashflows) {
+    if (cashflows.length < 2) return 0;
+
+    // Separate values and dates
+    const values = cashflows.map(cf => cf.amount);
+    const dates = cashflows.map(cf => cf.date);
+
+    // Find the time difference in years from the first transaction
+    const yearFractions = dates.map(date => (date.getTime() - dates[0].getTime()) / (1000 * 60 * 60 * 24 * 365));
+
+    // NPV function
+    const npv = (rate) => {
+        let result = 0;
+        for (let i = 0; i < values.length; i++) {
+            result += values[i] / Math.pow(1 + rate, yearFractions[i]);
+        }
+        return result;
+    };
+
+    // Derivative of NPV function
+    const derivative = (rate) => {
+        let result = 0;
+        for (let i = 0; i < values.length; i++) {
+            if (yearFractions[i] > 0) { // Avoid division by zero for the first transaction
+                result -= values[i] * yearFractions[i] / Math.pow(1 + rate, yearFractions[i] + 1);
+            }
+        }
+        return result;
+    };
+
+    // Newton-Raphson method to find the root (XIRR)
+    let guess = 0.1; // Initial guess
+    const tolerance = 1e-6;
+    const maxIterations = 100;
+
+    for (let i = 0; i < maxIterations; i++) {
+        const npvValue = npv(guess);
+        const derivativeValue = derivative(guess);
+
+        if (Math.abs(derivativeValue) < 1e-9) { // Avoid division by zero
+            break;
+        }
+
+        const newGuess = guess - npvValue / derivativeValue;
+
+        if (Math.abs(newGuess - guess) < tolerance) {
+            return newGuess;
+        }
+
+        guess = newGuess;
+    }
+
+    return guess; // Return the best guess if it doesn't converge
+}
+
 function calculatePortfolio(transactions, userSplits, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -232,8 +287,49 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
 
     const finalHoldings = calculateFinalHoldings(portfolio, marketData);
     const portfolioHistory = calculatePortfolioHistory(events, marketData);
+    const cashflows = createCashflows(events, finalHoldings, marketData);
+    const xirr = calculateXIRR(cashflows);
 
-    return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
+    return { holdings: finalHoldings, totalRealizedPL, portfolioHistory, xirr };
+}
+
+function createCashflows(events, finalHoldings, marketData) {
+    const cashflows = [];
+
+    // Add buy/sell transactions to cashflows
+    events.filter(e => e.eventType === 'transaction').forEach(t => {
+        const rateHistory = marketData["TWD=X"]?.rates || {};
+        const rateOnDate = findNearestDataPoint(rateHistory, t.date);
+        const amount = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
+
+        cashflows.push({
+            date: new Date(t.date),
+            amount: t.type === 'buy' ? -amount : amount
+        });
+    });
+
+    // Add dividends to cashflows
+    events.filter(e => e.eventType === 'dividend').forEach(d => {
+        const rateHistory = marketData["TWD=X"]?.rates || {};
+        const rateOnDate = findNearestDataPoint(rateHistory, d.date);
+        const amount = d.amount * (marketData[d.symbol]?.currency === 'USD' ? rateOnDate : 1);
+
+        cashflows.push({
+            date: new Date(d.date),
+            amount: amount
+        });
+    });
+
+    // Add current market value as the final cashflow
+    const totalMarketValue = Object.values(finalHoldings).reduce((sum, h) => sum + h.marketValueTWD, 0);
+    if (totalMarketValue > 0) {
+        cashflows.push({
+            date: new Date(),
+            amount: totalMarketValue
+        });
+    }
+
+    return cashflows;
 }
 
 function calculatePortfolioHistory(events, marketData) {
