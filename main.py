@@ -76,7 +76,7 @@ def fetch_and_update_market_data(db, symbols):
 
 if __name__ == "__main__":
     db_client = initialize_firebase()
-    print("Starting market data update script (User-Defined Split Model)...")
+    print("Starting market data update script...")
     symbols = get_all_symbols_from_transactions(db_client)
     if symbols:
         fetch_and_update_market_data(db_client, symbols)
