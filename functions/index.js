@@ -256,7 +256,12 @@ function calculatePortfolioHistory(events, marketData) {
 
 function getPortfolioStateOnDate(allEvents, targetDate) {
     const portfolioState = {};
+    
+    // 1. Filter events to the target date to get the state AT that date
     const relevantEvents = allEvents.filter(e => new Date(e.date) <= targetDate);
+    
+    // 2. Get all split events to adjust for future splits
+    const allSplitEvents = allEvents.filter(e => e.eventType === 'split');
 
     for (const event of relevantEvents) {
         const symbol = event.symbol.toUpperCase();
@@ -285,10 +290,28 @@ function getPortfolioStateOnDate(allEvents, targetDate) {
                 }
                 break;
             case 'split':
-                portfolioState[symbol].lots.forEach(lot => { lot.quantity *= event.ratio; });
+                // This logic now correctly applies splits as they happen chronologically
+                portfolioState[symbol].lots.forEach(lot => { 
+                    lot.quantity *= event.ratio; 
+                    // We also need to adjust the cost basis to maintain correct total cost
+                    if (lot.pricePerShareOriginal) lot.pricePerShareOriginal /= event.ratio;
+                    if (lot.pricePerShareTWD) lot.pricePerShareTWD /= event.ratio;
+                });
                 break;
         }
     }
+
+    // 3. Adjust the quantity for splits that happened AFTER the targetDate
+    // This is the key change to align quantities with forward-adjusted prices
+    for (const symbol in portfolioState) {
+        const futureSplits = allSplitEvents.filter(s => s.symbol.toUpperCase() === symbol && new Date(s.date) > targetDate);
+        for (const split of futureSplits) {
+            portfolioState[symbol].lots.forEach(lot => {
+                lot.quantity *= split.ratio;
+            });
+        }
+    }
+
     return portfolioState;
 }
 
