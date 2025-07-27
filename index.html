@@ -113,6 +113,7 @@
         let holdingsUnsubscribe = null;
         let confirmCallback = null;
 
+        const exchangeRateCache = new Map();
         let dataLoaded = { transactions: false, holdings: false };
 
         // --- 主程式入口 ---
@@ -192,7 +193,7 @@
             transactionsUnsubscribe = onSnapshot(q, (snapshot) => {
                 transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                 dataLoaded.transactions = true;
-                renderAll();
+                updateExchangeRateCache().then(() => renderAll());
             }, (error) => console.error("讀取交易紀錄失敗:", error));
             
             const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
@@ -259,6 +260,7 @@
             });
         }
 
+        // ** CORRECTED LOGIC FOR TRANSACTION TABLE **
         async function renderTransactionsTable() {
             const tableBody = document.getElementById('transactions-table-body');
             tableBody.innerHTML = '';
@@ -273,17 +275,32 @@
                 const typeText = { buy: '買入', sell: '賣出', dividend: '股息' };
                 const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' };
                 
-                const totalAmount = t.totalCost || (t.quantity * t.price);
-                const rate = t.exchangeRate || '自動';
-                const totalAmountTWD = totalAmount * (t.currency === 'USD' ? (t.exchangeRate || 1) : 1); // Note: This is a rough estimate for display only
+                const totalAmountOriginal = t.totalCost || (t.quantity * t.price);
+                const transactionDate = t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date;
+
+                let rateForDisplay = 'N/A';
+                let totalAmountTWD_HTML = '計算中...';
+
+                if (t.currency === 'TWD') {
+                    rateForDisplay = '1.0';
+                    totalAmountTWD_HTML = formatNumber(totalAmountOriginal, 0);
+                } else {
+                    const usedRate = t.exchangeRate || exchangeRateCache.get(transactionDate);
+                    if (usedRate) {
+                        rateForDisplay = t.exchangeRate ? `${formatNumber(usedRate, 4)} (手動)` : `${formatNumber(usedRate, 4)} (自動)`;
+                        totalAmountTWD_HTML = formatNumber(totalAmountOriginal * usedRate, 0);
+                    } else {
+                        totalAmountTWD_HTML = '<span class="text-xs text-orange-600">匯率資料不足</span>';
+                    }
+                }
 
                 row.innerHTML = `
-                    <td class="px-6 py-4 whitespace-nowrap">${t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${transactionDate}</td>
                     <td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td>
                     <td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.quantity)}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td>
-                    <td class="px-6 py-4 whitespace-nowrap">${formatNumber(totalAmount, 0)} <span class="text-xs text-gray-500">(匯率: ${rate})</span></td>
+                    <td class="px-6 py-4 whitespace-nowrap">${totalAmountTWD_HTML} <span class="text-xs text-gray-500">@ ${rateForDisplay}</span></td>
                     <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${t.id}" class="edit-btn text-indigo-600 hover:text-indigo-900 mr-3">編輯</button><button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900">刪除</button></td>`;
                 tableBody.appendChild(row);
             };
@@ -332,6 +349,62 @@
                 .sort((a, b) => new Date(a[0]) - new Date(b[0]))
                 .map(([date, value]) => [new Date(date).getTime(), value]);
             chart.updateSeries([{ data: chartData }]);
+        }
+
+        // --- API & 價格快取 ---
+        async function updateExchangeRateCache() {
+            const uniqueDates = [...new Set(transactions.map(t => t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date))];
+            const rateDocRef = doc(db, 'exchange_rates', 'TWD=X');
+            
+            try {
+                const docSnap = await getDoc(rateDocRef);
+                if (docSnap.exists()) {
+                    const rates = docSnap.data().rates;
+                    for (const date of uniqueDates) {
+                        if (!exchangeRateCache.has(date)) {
+                            exchangeRateCache.set(date, findNearestAvailableRate(rates, date));
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error(`從 Firestore 讀取匯率失敗:`, e);
+            }
+        }
+
+        // ** CORRECTED LOGIC FOR FINDING RATES **
+        function findNearestAvailableRate(history, targetDateStr) {
+            if (!history || !targetDateStr || Object.keys(history).length === 0) return null;
+            
+            const targetDate = new Date(targetDateStr);
+
+            // 1. Exact match
+            if (history[targetDateStr]) return history[targetDateStr];
+
+            // 2. Search forward up to 7 days (for weekends/holidays)
+            for (let i = 1; i <= 7; i++) {
+                const d = new Date(targetDate);
+                d.setDate(d.getDate() + i);
+                const d_str = d.toISOString().split('T')[0];
+                if (history[d_str]) {
+                    return history[d_str];
+                }
+            }
+
+            // 3. Fallback: search backward to find the last known rate
+            const sortedDates = Object.keys(history).sort();
+            let closestDate = null;
+            for (const dateStr of sortedDates) {
+                if (dateStr <= targetDateStr) {
+                    closestDate = dateStr;
+                } else {
+                    break;
+                }
+            }
+            if (closestDate) {
+                return history[closestDate];
+            }
+
+            return null; // Return null if no rate found
         }
 
         // --- Modal & 表單處理 ---
@@ -396,7 +469,11 @@
             const id = e.target.dataset.id; 
             const transaction = transactions.find(t => t.id === id); 
             if (transaction) { 
-                openModal(true, transaction); 
+                const txDataForEdit = { ...transaction };
+                if (txDataForEdit.date && txDataForEdit.date.toDate) {
+                    txDataForEdit.date = txDataForEdit.date.toDate().toISOString().split('T')[0];
+                }
+                openModal(true, txDataForEdit); 
             } 
         }
 
@@ -408,7 +485,7 @@
             if (isEdit && transaction) {
                 document.getElementById('modal-title').textContent = '編輯交易紀錄'; 
                 document.getElementById('transaction-id').value = transaction.id; 
-                document.getElementById('transaction-date').value = transaction.date.toDate ? transaction.date.toDate().toISOString().split('T')[0] : transaction.date;
+                document.getElementById('transaction-date').value = transaction.date;
                 document.getElementById('stock-symbol').value = transaction.symbol; 
                 document.querySelector(`input[name="transaction-type"][value="${transaction.type}"]`).checked = true; 
                 document.getElementById('quantity').value = transaction.quantity; 
