@@ -5,7 +5,7 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
-// Final, definitive version incorporating all user feedback and logic corrections.
+// Final, definitive version with the "Adjust-on-the-fly" model, correctly implemented.
 exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
     .document("users/{userId}/transactions/{transactionId}")
     .onWrite(async (change, context) => {
@@ -20,7 +20,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         };
 
         try {
-            log("--- Recalculation triggered (v21 - Final Logic Fix) ---");
+            log("--- Recalculation triggered (v25 - Single Source of Truth) ---");
 
             const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
             const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
@@ -43,12 +43,12 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
                 throw new Error("Market data is empty after fetch.");
             }
 
-            log("Starting final FIFO calculation...");
+            log("Starting final calculation with Adjust-on-the-fly model...");
             const result = calculatePortfolio(transactions, marketData, log);
             if (!result) throw new Error("Calculation function returned undefined.");
 
             const { holdings, totalRealizedPL, portfolioHistory } = result;
-            log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}`);
+            log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}`);
 
             log("Saving results...");
             await Promise.all([
@@ -65,6 +65,7 @@ exports.recalculateHoldings = functions.runWith({ timeoutSeconds: 300, memory: '
         }
     });
 
+// Simplified data fetcher. It no longer performs reverse adjustments.
 async function getMarketDataFromDb(transactions, log) {
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
     const allSymbols = [...new Set([...symbols, "TWD=X"])];
@@ -80,7 +81,7 @@ async function getMarketDataFromDb(transactions, log) {
             marketData[symbol] = doc.data();
         } else {
             log(`Data for ${symbol} not found. Performing emergency fetch...`);
-            const fetchedData = await fetchAndReverseAdjustMarketData(symbol, log);
+            const fetchedData = await fetchAndSaveMarketData(symbol, log);
             if (fetchedData) {
                 marketData[symbol] = fetchedData;
                 await docRef.set(fetchedData);
@@ -91,8 +92,7 @@ async function getMarketDataFromDb(transactions, log) {
     return marketData;
 }
 
-// Correctly implements the reverse-adjustment logic for prices, mirroring the Python script.
-async function fetchAndReverseAdjustMarketData(symbol, log) {
+async function fetchAndSaveMarketData(symbol, log) {
     try {
         log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
         const queryOptions = { period1: '2000-01-01' };
@@ -103,26 +103,14 @@ async function fetchAndReverseAdjustMarketData(symbol, log) {
             return null;
         }
 
-        log(`[Fetch] Received ${hist.length} data points for ${symbol}. Reverse-adjusting prices...`);
+        log(`[Fetch] Received ${hist.length} data points for ${symbol}.`);
 
         const prices = {};
+        hist.forEach(item => {
+            prices[item.date.toISOString().split('T')[0]] = item.close;
+        });
+
         const splits = {};
-        let cumulativeRatio = 1.0;
-
-        const splitEvents = (hist.splits || []).sort((a, b) => new Date(b.date) - new Date(a.date));
-        let splitIndex = 0;
-
-        for (let i = hist.length - 1; i >= 0; i--) {
-            const item = hist[i];
-            const itemDate = new Date(item.date);
-
-            while (splitIndex < splitEvents.length && itemDate < splitEvents[splitIndex].date) {
-                cumulativeRatio *= splitEvents[splitIndex].numerator / splitEvents[splitIndex].denominator;
-                splitIndex++;
-            }
-            prices[item.date.toISOString().split('T')[0]] = item.close * cumulativeRatio;
-        }
-        
         (hist.splits || []).forEach(s => {
             splits[s.date.toISOString().split('T')[0]] = s.numerator / s.denominator;
         });
@@ -132,7 +120,7 @@ async function fetchAndReverseAdjustMarketData(symbol, log) {
             splits: splits,
             dividends: (hist.dividends || []).reduce((acc, d) => ({ ...acc, [d.date.toISOString().split('T')[0]]: d.amount }), {}),
             lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            dataSource: 'emergency-fetch-original-price-v6'
+            dataSource: 'emergency-fetch-split-adjusted-v2'
         };
 
         if (symbol === 'TWD=X') {
@@ -147,7 +135,7 @@ async function fetchAndReverseAdjustMarketData(symbol, log) {
     }
 }
 
-// Final, corrected calculation engine.
+// Final, definitive calculation engine.
 function calculatePortfolio(transactions, marketData, log) {
     const events = [];
     const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
@@ -158,9 +146,6 @@ function calculatePortfolio(transactions, marketData, log) {
     for (const symbol of symbols) {
         const stockData = marketData[symbol];
         if (!stockData) continue;
-        Object.entries(stockData.splits || {}).forEach(([date, ratio]) => {
-            events.push({ date: new Date(date), symbol, ratio, eventType: 'split' });
-        });
         Object.entries(stockData.dividends || {}).forEach(([date, amount]) => {
             events.push({ date: new Date(date), symbol, amount, eventType: 'dividend' });
         });
@@ -190,28 +175,30 @@ function calculatePortfolio(transactions, marketData, log) {
         }
 
         const rateHistory = marketData["TWD=X"]?.rates || {};
-        
+        const rateOnDate = findNearestDataPoint(rateHistory, eventDate);
+        const splitsHistory = marketData[symbol]?.splits || {};
+
         switch (event.eventType) {
             case 'transaction':
                 const t = event;
                 portfolio[symbol].currency = t.currency;
+
+                const futureSplitRatio = getFutureSplitRatio(splitsHistory, eventDate);
+                const adjustedQuantity = t.quantity * futureSplitRatio;
+                const adjustedPrice = t.price / futureSplitRatio;
                 
-                const rateOnDate = t.exchangeRate || findNearestDataPoint(rateHistory, eventDate);
-                
-                const totalOriginalCost = t.totalCost || (t.quantity * t.price);
-                const costPerShareOriginal = totalOriginalCost / t.quantity;
-                const costPerShareTWD = costPerShareOriginal * (t.currency === 'USD' ? rateOnDate : 1);
+                const costPerAdjustedShareTWD = adjustedPrice * (t.currency === 'USD' ? rateOnDate : 1);
 
                 if (t.type === 'buy') {
                     portfolio[symbol].lots.push({ 
-                        quantity: t.quantity, 
-                        pricePerShareTWD: costPerShareTWD, 
-                        pricePerShareOriginal: costPerShareOriginal,
+                        quantity: adjustedQuantity, 
+                        pricePerShareTWD: costPerAdjustedShareTWD, 
+                        originalPrice: t.price, // Keep original for reference
                         date: eventDate 
                     });
                 } else if (t.type === 'sell') {
-                    let sharesToSell = t.quantity;
-                    const saleValueTWD = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
+                    let sharesToSell = adjustedQuantity;
+                    const saleValueTWD = adjustedQuantity * adjustedPrice * (t.currency === 'USD' ? rateOnDate : 1);
                     let costOfSoldSharesTWD = 0;
 
                     while (sharesToSell > 0 && portfolio[symbol].lots.length > 0) {
@@ -230,17 +217,9 @@ function calculatePortfolio(transactions, marketData, log) {
                 }
                 break;
 
-            case 'split':
-                // This is now correctly handled
-                portfolio[symbol].lots.forEach(lot => { 
-                    lot.quantity *= event.ratio; 
-                });
-                break;
-
             case 'dividend':
-                const totalShares = portfolio[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
-                const dividendRate = findNearestDataPoint(rateHistory, eventDate);
-                const dividendTWD = event.amount * totalShares * (portfolio[symbol].currency === 'USD' ? dividendRate : 1);
+                const totalAdjustedShares = portfolio[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
+                const dividendTWD = event.amount * totalAdjustedShares * (portfolio[symbol].currency === 'USD' ? rateOnDate : 1);
                 totalRealizedPL += dividendTWD;
                 break;
         }
@@ -257,26 +236,27 @@ function calculatePortfolio(transactions, marketData, log) {
 
     for (const symbol of Object.keys(portfolio)) {
         const holding = portfolio[symbol];
-        const totalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+        const totalAdjustedQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+        const splitsHistory = marketData[symbol]?.splits || {};
+        const todaySplitRatio = getFutureSplitRatio(splitsHistory, today); // This will be 1
+        const totalOriginalQuantity = totalAdjustedQuantity / todaySplitRatio; // Should be same as totalAdjustedQuantity
 
-        if (totalQuantity > 1e-9) {
+        if (totalAdjustedQuantity > 1e-9) {
             const totalCostTWD = holding.lots.reduce((sum, lot) => sum + (lot.quantity * lot.pricePerShareTWD), 0);
-            const totalCostOriginal = holding.lots.reduce((sum, lot) => sum + (lot.quantity * lot.pricePerShareOriginal), 0);
-
             const priceHistory = marketData[symbol]?.prices || {};
-            const latestPriceOriginal = findNearestDataPoint(priceHistory, today);
+            const latestPrice = findNearestDataPoint(priceHistory, today);
             const rate = holding.currency === 'USD' ? latestRate : 1;
             
-            const marketValueTWD = totalQuantity * latestPriceOriginal * rate;
+            const marketValueTWD = totalAdjustedQuantity * latestPrice * rate;
             const unrealizedPLTWD = marketValueTWD - totalCostTWD;
 
             finalHoldings[symbol] = {
                 symbol: symbol,
-                quantity: totalQuantity,
-                avgCostOriginal: totalCostOriginal > 0 ? totalCostOriginal / totalQuantity : 0,
+                quantity: totalAdjustedQuantity, // Display the split-adjusted quantity
+                avgCostOriginal: totalCostTWD > 0 ? totalCostTWD / totalAdjustedQuantity : 0, // This is now avg cost per *adjusted* share
                 totalCostTWD: totalCostTWD,
                 currency: holding.currency,
-                currentPriceOriginal: latestPriceOriginal,
+                currentPriceOriginal: latestPrice, // This is the split-adjusted price
                 marketValueTWD: marketValueTWD,
                 unrealizedPLTWD: unrealizedPLTWD,
                 returnRate: totalCostTWD > 0 ? (unrealizedPLTWD / totalCostTWD) * 100 : 0,
@@ -287,19 +267,30 @@ function calculatePortfolio(transactions, marketData, log) {
     return { holdings: finalHoldings, totalRealizedPL, portfolioHistory };
 }
 
+function getFutureSplitRatio(splits, fromDate) {
+    if (!splits) return 1;
+    let ratio = 1;
+    Object.entries(splits).forEach(([dateStr, splitRatio]) => {
+        if (new Date(dateStr) > fromDate) {
+            ratio *= splitRatio;
+        }
+    });
+    return ratio;
+}
+
 function calculateDailyMarketValue(portfolio, marketData, date) {
     let totalValue = 0;
     const rateOnDate = findNearestDataPoint(marketData["TWD=X"]?.rates || {}, date);
 
     for (const symbol in portfolio) {
         const holding = portfolio[symbol];
-        const totalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+        const totalAdjustedQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
 
-        if (totalQuantity > 0) {
+        if (totalAdjustedQuantity > 0) {
             const priceHistory = marketData[symbol]?.prices || {};
             const priceOnDate = findNearestDataPoint(priceHistory, date);
             const rate = holding.currency === 'USD' ? rateOnDate : 1;
-            totalValue += totalQuantity * priceOnDate * rate;
+            totalValue += totalAdjustedQuantity * priceOnDate * rate;
         }
     }
     return totalValue;
