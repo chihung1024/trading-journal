@@ -113,6 +113,80 @@ exports.recalculateOnSplit = functions.firestore
         await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     });
 
+// 監聽個股歷史資料 price_history/{symbol}
+exports.recalculateOnPriceUpdate = functions
+  .runWith({ timeoutSeconds: 240, memory: "1GB" })     // 視計算量調整
+  .firestore
+  .document("price_history/{symbol}")
+  .onWrite(async (change, context) => {
+    const symbol = context.params.symbol.toUpperCase();
+    const before = change.before.exists ? change.before.data() : null;
+    const after  = change.after.data();
+
+    // 1. 是否真的有 meaningful 變動？避免無限迴圈
+    if (before &&
+        JSON.stringify(before.prices)    === JSON.stringify(after.prices) &&
+        JSON.stringify(before.dividends) === JSON.stringify(after.dividends)) {
+      console.log(`[${symbol}] only metadata changed, skip.`);
+      return null;
+    }
+
+    console.log(`[${symbol}] market data changed, finding affected users…`);
+
+    // 2. 找出所有持有該股票的使用者（跨 collectionGroup 搜尋）
+    const txSnap = await db.collectionGroup("transactions")
+                           .where("symbol", "==", symbol)
+                           .get();
+
+    if (txSnap.empty) {
+      console.log(`[${symbol}] no users hold this symbol, done.`);
+      return null;
+    }
+
+    const affectedUsers = new Set(
+      txSnap.docs.map(d => d.ref.path.split("/")[1])   // users/{uid}/…
+    );
+
+    // 3. 對每位使用者塞 force_recalc_timestamp，讓主要計算函式動起來
+    const nowTS = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all(
+      [...affectedUsers].map(uid =>
+        db.doc(`users/${uid}/user_data/current_holdings`)
+          .set({ force_recalc_timestamp: nowTS }, { merge: true })
+      )
+    );
+
+    console.log(`[${symbol}] triggered ${affectedUsers.size} users to recalc.`);
+    return null;
+  });
+
+// 監聽匯率檔 exchange_rates/TWD=X
+exports.recalculateOnFxUpdate = functions
+  .runWith({ timeoutSeconds: 240, memory: "1GB" })
+  .firestore
+  .document("exchange_rates/TWD=X")
+  .onWrite(async (change, context) => {
+    const before = change.before.exists ? change.before.data() : null;
+    const after  = change.after.data();
+
+    if (before && JSON.stringify(before.rates) === JSON.stringify(after.rates)) {
+      console.log("TWD=X metadata only, skip.");
+      return null;
+    }
+
+    const users = await db.collection("users").listDocuments();
+    const nowTS = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all(
+      users.map(u =>
+        db.doc(`users/${u.id}/user_data/current_holdings`)
+          .set({ force_recalc_timestamp: nowTS }, { merge: true })
+      )
+    );
+    console.log(`FX updated → triggered ${users.length} users.`);
+    return null;
+  });
+
+
 
 // =================================================================================
 // === Data Fetching and Processing Functions (Unchanged) ========================
