@@ -74,12 +74,35 @@ def fetch_and_update_market_data(db, symbols):
         except Exception as e:
             print(f"ERROR: Failed to process data for {symbol}. Reason: {e}")
 
+def get_all_user_ids(db):
+    user_ids = set()
+    try:
+        users = db.collection("users").stream()
+        for user in users:
+            user_ids.add(user.id)
+    except Exception as e:
+        print(f"Warning: Could not read users. Error: {e}")
+    print(f"Found {len(user_ids)} unique users: {list(user_ids)}")
+    return list(user_ids)
+
+def trigger_recalculation_for_users(db, user_ids):
+    for user_id in user_ids:
+        try:
+            doc_ref = db.collection("users").document(user_id).collection("user_data").document("current_holdings")
+            doc_ref.update({"force_recalc_timestamp": firestore.SERVER_TIMESTAMP})
+            print(f"Successfully triggered recalculation for user: {user_id}")
+        except Exception as e:
+            print(f"ERROR: Failed to trigger recalculation for user {user_id}. Reason: {e}")
+
 if __name__ == "__main__":
     db_client = initialize_firebase()
-    print("Starting market data update script...")
+    print("Starting market data update script (User-Defined Split Model)...")
     symbols = get_all_symbols_from_transactions(db_client)
     if symbols:
         fetch_and_update_market_data(db_client, symbols)
+        user_ids = get_all_user_ids(db_client)
+        if user_ids:
+            trigger_recalculation_for_users(db_client, user_ids)
     else:
         print("No transactions found.")
     print("Market data update script finished.")
