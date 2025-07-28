@@ -1,108 +1,105 @@
-import os
+import os, json
+from datetime import datetime
+import pandas as pd
 import yfinance as yf
 import firebase_admin
 from firebase_admin import credentials, firestore, get_app
-import json
-from datetime import datetime
-import pandas as pd
 
+
+# ────────────────────────────────
+# 0. Firebase 初始化
+# ────────────────────────────────
 def initialize_firebase():
     try:
         get_app()
     except ValueError:
-        try:
-            service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
-            cred = credentials.Certificate(service_account_info)
-            firebase_admin.initialize_app(cred)
-        except Exception as e:
-            print(f"Firebase initialization failed: {e}")
-            exit(1)
+        cred = credentials.Certificate(
+            json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"]))
+        firebase_admin.initialize_app(cred)
     return firestore.client()
 
+
+# ────────────────────────────────
+# 1. 輔助函式
+# ────────────────────────────────
 def get_all_symbols_from_transactions(db):
-    all_symbols = set()
-    try:
-        transactions_group = db.collection_group("transactions")
-        for trans_doc in transactions_group.stream():
-            symbol = trans_doc.to_dict().get('symbol')
-            if symbol:
-                all_symbols.add(symbol.upper())
-    except Exception as e:
-        print(f"Warning: Could not read transactions. Error: {e}")
-    print(f"Found {len(all_symbols)} unique symbols: {list(all_symbols)}")
-    return list(all_symbols)
-
-# Simplified data fetcher. It no longer fetches or stores split data.
-# It only fetches prices (which are split-adjusted) and dividends.
-def fetch_and_update_market_data(db, symbols):
-    all_symbols_to_update = list(set(symbols + ["TWD=X"]))
-    
-    for symbol in all_symbols_to_update:
-        print(f"--- Processing: {symbol} ---")
-        try:
-            stock = yf.Ticker(symbol)
-            # auto_adjust=False gives split-adjusted prices and separate dividend data.
-            hist = stock.history(start="2000-01-01", interval="1d", auto_adjust=False, back_adjust=False)
-            
-            if hist.empty:
-                print(f"Warning: No history found for {symbol}.")
-                continue
-
-            prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if not pd.isna(val)}
-            dividends = {idx.strftime('%Y-%m-%d'): val for idx, val in stock.dividends.items()}
-
-            is_forex = symbol == "TWD=X"
-            collection_name = "exchange_rates" if is_forex else "price_history"
-            doc_ref = db.collection(collection_name).document(symbol)
-
-            payload = {
-                "prices": prices,
-                "dividends": dividends,
-                "lastUpdated": datetime.now().isoformat(),
-                "dataSource": "yfinance-user-defined-split-model-v1"
-            }
-            if is_forex:
-                payload["rates"] = payload.pop("prices")
-                del payload["dividends"] # No dividends for forex
-
-            # We no longer store split data from yfinance
-            payload["splits"] = {}
-
-            doc_ref.set(payload)
-            print(f"Successfully wrote price/dividend data for {symbol} to Firestore.")
-
-        except Exception as e:
-            print(f"ERROR: Failed to process data for {symbol}. Reason: {e}")
+    symbols = { d.to_dict().get('symbol', '').upper()
+                for d in db.collection_group('transactions').stream()
+                if d.to_dict().get('symbol') }
+    print(f'[INFO] symbols found in transactions: {symbols}')
+    return list(symbols)
 
 def get_all_user_ids(db):
-    user_ids = set()
-    try:
-        users = db.collection("users").stream()
-        for user in users:
-            user_ids.add(user.id)
-    except Exception as e:
-        print(f"Warning: Could not read users. Error: {e}")
-    print(f"Found {len(user_ids)} unique users: {list(user_ids)}")
-    return list(user_ids)
+    user_ids = [u.id for u in db.collection('users').stream()]
+    return user_ids
 
-def trigger_recalculation_for_users(db, user_ids):
-    for user_id in user_ids:
-        try:
-            doc_ref = db.collection("users").document(user_id).collection("user_data").document("current_holdings")
-            doc_ref.update({"force_recalc_timestamp": firestore.SERVER_TIMESTAMP})
-            print(f"Successfully triggered recalculation for user: {user_id}")
-        except Exception as e:
-            print(f"ERROR: Failed to trigger recalculation for user {user_id}. Reason: {e}")
+def trigger_recalc(db, user_ids):
+    if not user_ids: return
+    batch = db.batch()
+    for uid in user_ids:
+        ref = (db.collection('users').document(uid)
+                 .collection('user_data').document('current_holdings'))
+        batch.set(ref,
+                  {'force_recalc_timestamp': firestore.SERVER_TIMESTAMP},
+                  merge=True)
+    batch.commit()
+    print(f'[INFO] recalculation triggered for {len(user_ids)} users')
 
-if __name__ == "__main__":
-    db_client = initialize_firebase()
-    print("Starting market data update script (User-Defined Split Model)...")
-    symbols = get_all_symbols_from_transactions(db_client)
-    if symbols:
-        fetch_and_update_market_data(db_client, symbols)
-        user_ids = get_all_user_ids(db_client)
-        if user_ids:
-            trigger_recalculation_for_users(db_client, user_ids)
+def write_market_data(db, symbol, prices, dividends):
+    is_fx = symbol == 'TWD=X'
+    collection = 'exchange_rates' if is_fx else 'price_history'
+
+    payload = {
+        'lastUpdated': datetime.utcnow().isoformat(),
+        'dataSource' : 'yfinance',
+        'splits'     : {}
+    }
+    if is_fx:
+        payload['rates'] = prices        # 匯率沒有 dividends
     else:
-        print("No transactions found.")
-    print("Market data update script finished.")
+        payload['prices']    = prices
+        payload['dividends'] = dividends
+
+    db.collection(collection).document(symbol).set(payload, merge=True)
+    print(f'[INFO] {symbol} written to {collection} (merge=True)')
+
+
+# ────────────────────────────────
+# 2. 主流程
+# ────────────────────────────────
+def fetch_and_update_market_data(db, symbols):
+    for symbol in set(symbols + ['TWD=X']):
+        print(f'--- Updating {symbol} ---')
+        try:
+            t = yf.Ticker(symbol)
+            hist = t.history(start='2000-01-01', interval='1d',
+                             auto_adjust=False, back_adjust=False)
+            if hist.empty:
+                print(f'[WARN] no data for {symbol}')
+                continue
+
+            prices = {d.strftime('%Y-%m-%d'): v
+                      for d, v in hist['Close'].items()
+                      if not pd.isna(v)}
+            dividends = {d.strftime('%Y-%m-%d'): v
+                         for d, v in t.dividends.items()}
+
+            write_market_data(db, symbol, prices, dividends)
+
+        except Exception as e:
+            print(f'[ERROR] {symbol}: {e}')
+
+    # 完成所有股票後，一次性觸發所有使用者重新計算
+    trigger_recalc(db, get_all_user_ids(db))
+
+
+# ────────────────────────────────
+# 3. CLI 進入點（GitHub Action）
+# ────────────────────────────────
+if __name__ == '__main__':
+    db = initialize_firebase()
+    symbols = get_all_symbols_from_transactions(db)
+    if symbols:
+        fetch_and_update_market_data(db, symbols)
+    else:
+        print('[INFO] no symbols found, nothing to update')
