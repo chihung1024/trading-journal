@@ -1,391 +1,607 @@
-/*  functions/index.js  ─ 2025-07-30 final  */
-
-const functions    = require('firebase-functions');
-const admin        = require('firebase-admin');
-const yahooFinance = require('yahoo-finance2').default;
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+const yahooFinance = require("yahoo-finance2").default;
 
 admin.initializeApp();
 const db = admin.firestore();
 
-/* ────── 共用工具 ────── */
-function findNearestDataPoint(history, targetDate) {
-  if (!history || Object.keys(history).length === 0) return 1;
-  const d = new Date(targetDate); d.setUTCHours(12,0,0,0);
-
-  /* 往前找 7 天 */
-  for (let i = 0; i < 7; i++) {
-    const s = new Date(d); s.setDate(s.getDate() - i);
-    const k = s.toISOString().slice(0,10);
-    if (history[k] !== undefined) return history[k];
-  }
-  /* 萬不得已用歷史中最近一筆 */
-  const keys = Object.keys(history).sort();
-  const tgt  = d.toISOString().slice(0,10);
-  let closest = null;
-  for (const k of keys) { if (k <= tgt) closest = k; else break; }
-  return closest ? history[closest] : 1;
-}
-
-/* ────── 市場資料 ────── */
-async function fetchAndSaveMarketData(symbol, log) {
-  try {
-    log(`[Fetch] ${symbol}`);
-    const priceRows = await yahooFinance.historical(symbol, { period1: '2000-01-01' });
-    if (!priceRows || priceRows.length === 0) return null;
-
-    const prices = {};
-    priceRows.forEach(r => { prices[r.date.toISOString().slice(0,10)] = r.close; });
-
-    /* 另抓配息 */
-    let dividends = {};
-    if (symbol !== 'TWD=X') {
-      const divRows = await yahooFinance.historical(symbol, { period1: '2000-01-01', events: 'div' });
-      (divRows || []).forEach(r => {
-        if (r.dividends) dividends[r.date.toISOString().slice(0,10)] = r.dividends;
-      });
-    }
-
-    const payload = {
-      prices,
-      dividends,
-      splits: {},
-      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-      dataSource: 'emergency-fetch'
+// =================================================================================
+// === Core Calculation Logic (Refactored to be reusable) ========================
+// =================================================================================
+async function performRecalculation(userId) {
+    const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
+    const logs = [];
+    const log = (message) => {
+        const timestamp = new Date().toISOString();
+        logs.push(`${timestamp}: ${message}`);
+        console.log(`[${userId}] ${timestamp}: ${message}`);
     };
-    if (symbol === 'TWD=X') {
-      payload.rates = payload.prices;
-      delete payload.dividends;
+
+    try {
+        log("--- Recalculation triggered (v31 - Unified Trigger) ---");
+
+        const holdingsDocRef = db.doc(`users/${userId}/user_data/current_holdings`);
+        const historyDocRef = db.doc(`users/${userId}/user_data/portfolio_history`);
+
+        const [transactionsSnapshot, userSplitsSnapshot] = await Promise.all([
+            db.collection(`users/${userId}/transactions`).get(),
+            db.collection(`users/${userId}/splits`).get()
+        ]);
+
+        const transactions = transactionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const userSplits = userSplitsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        if (transactions.length === 0) {
+            log("No transactions found. Clearing data.");
+            await Promise.all([
+                holdingsDocRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+                historyDocRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+            ]);
+            return;
+        }
+
+        const marketData = await getMarketDataFromDb(transactions, log);
+        if (!marketData || Object.keys(marketData).length === 0) {
+            throw new Error("Market data is empty after fetch.");
+        }
+
+        log("Starting final, corrected calculation...");
+        const result = calculatePortfolio(transactions, userSplits, marketData, log);
+        if (!result) throw new Error("Calculation function returned undefined.");
+
+        const { holdings, totalRealizedPL, portfolioHistory, xirr } = result;
+        log(`Calculation complete. Holdings: ${Object.keys(holdings).length}, Realized P/L: ${totalRealizedPL}, History points: ${Object.keys(portfolioHistory).length}, XIRR: ${xirr}`);
+
+        log("Saving results...");
+
+        // Prepare the final data, ensuring the trigger field is removed to prevent loops
+        const finalData = { 
+            holdings, 
+            totalRealizedPL, 
+            xirr, 
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            force_recalc_timestamp: admin.firestore.FieldValue.delete() // Remove the trigger field
+        };
+
+        await Promise.all([
+            holdingsDocRef.set(finalData, { merge: true }), // Use merge to avoid race conditions
+            historyDocRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+        ]);
+        log("--- Recalculation finished successfully! ---");
+
+    } catch (error) {
+        console.error(`[${userId}] CRITICAL ERROR:`, error);
+        log(`CRITICAL ERROR: ${error.message}. Stack: ${error.stack}`);
+    } finally {
+        await logRef.set({ entries: logs });
+    }
+}
+
+// =================================================================================
+// === Firestore Triggers ========================================================
+// =================================================================================
+
+// This is the primary trigger for all recalculations.
+exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: '1GB' }).firestore
+    .document("users/{userId}/user_data/current_holdings")
+    .onUpdate(async (change, context) => {
+        const before = change.before.data();
+        const after = change.after.data();
+
+        // Check if the update was triggered by our daily script
+        if (after.force_recalc_timestamp && before.force_recalc_timestamp !== after.force_recalc_timestamp) {
+            console.log(`Recalculation forced for user ${context.params.userId} by daily update.`);
+            await performRecalculation(context.params.userId);
+        }
+    });
+
+// Trigger for Transaction changes (now just a passthrough to the main trigger)
+exports.recalculateOnTransaction = functions.firestore
+    .document("users/{userId}/transactions/{transactionId}")
+    .onWrite(async (change, context) => {
+        const holdingsRef = db.doc(`users/${context.params.userId}/user_data/current_holdings`);
+        // Use set with merge to create the doc if it doesn't exist, or update it if it does.
+        await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    });
+
+// Trigger for Split changes (now just a passthrough to the main trigger)
+exports.recalculateOnSplit = functions.firestore
+    .document("users/{userId}/splits/{splitId}")
+    .onWrite(async (change, context) => {
+        const holdingsRef = db.doc(`users/${context.params.userId}/user_data/current_holdings`);
+        // Use set with merge for robustness.
+        await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    });
+
+// 監聽個股歷史資料 price_history/{symbol}
+exports.recalculateOnPriceUpdate = functions
+  .runWith({ timeoutSeconds: 240, memory: "1GB" })     // 視計算量調整
+  .firestore
+  .document("price_history/{symbol}")
+  .onWrite(async (change, context) => {
+    const symbol = context.params.symbol.toUpperCase();
+    const before = change.before.exists ? change.before.data() : null;
+    const after  = change.after.data();
+
+    // 1. 是否真的有 meaningful 變動？避免無限迴圈
+    if (before &&
+        JSON.stringify(before.prices)    === JSON.stringify(after.prices) &&
+        JSON.stringify(before.dividends) === JSON.stringify(after.dividends)) {
+      console.log(`[${symbol}] only metadata changed, skip.`);
+      return null;
     }
 
-    const col = symbol === 'TWD=X' ? 'exchange_rates' : 'price_history';
-    await db.collection(col).doc(symbol).set(payload);
-    return payload;
-  } catch (e) {
-    log(`[Fetch ERROR] ${symbol} ${e.message}`);
+    console.log(`[${symbol}] market data changed, finding affected users…`);
+
+    // 2. 找出所有持有該股票的使用者（跨 collectionGroup 搜尋）
+    const txSnap = await db.collectionGroup("transactions")
+                           .where("symbol", "==", symbol)
+                           .get();
+
+    if (txSnap.empty) {
+      console.log(`[${symbol}] no users hold this symbol, done.`);
+      return null;
+    }
+
+    const affectedUsers = new Set(
+      txSnap.docs.map(d => d.ref.path.split("/")[1])   // users/{uid}/…
+    );
+
+    // 3. 對每位使用者塞 force_recalc_timestamp，讓主要計算函式動起來
+    const nowTS = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all(
+      [...affectedUsers].map(uid =>
+        db.doc(`users/${uid}/user_data/current_holdings`)
+          .set({ force_recalc_timestamp: nowTS }, { merge: true })
+      )
+    );
+
+    console.log(`[${symbol}] triggered ${affectedUsers.size} users to recalc.`);
     return null;
-  }
-}
+  });
+
+// 監聽匯率檔 exchange_rates/TWD=X
+exports.recalculateOnFxUpdate = functions
+  .runWith({ timeoutSeconds: 240, memory: "1GB" })
+  .firestore
+  .document("exchange_rates/TWD=X")
+  .onWrite(async (change, context) => {
+    const before = change.before.exists ? change.before.data() : null;
+    const after  = change.after.data();
+
+    if (before && JSON.stringify(before.rates) === JSON.stringify(after.rates)) {
+      console.log("TWD=X metadata only, skip.");
+      return null;
+    }
+
+    const users = await db.collection("users").listDocuments();
+    const nowTS = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all(
+      users.map(u =>
+        db.doc(`users/${u.id}/user_data/current_holdings`)
+          .set({ force_recalc_timestamp: nowTS }, { merge: true })
+      )
+    );
+    console.log(`FX updated → triggered ${users.length} users.`);
+    return null;
+  });
+
+
+
+// =================================================================================
+// === Data Fetching and Processing Functions (Unchanged) ========================
+// =================================================================================
 
 async function getMarketDataFromDb(transactions, log) {
-  const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
-  const all     = [...new Set([...symbols, 'TWD=X'])];
-  const data    = {};
+    const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
+    const allSymbols = [...new Set([...symbols, "TWD=X"])];
+    log(`Required symbols: [${allSymbols.join(', ')}]`);
+    const marketData = {};
 
-  for (const sym of all) {
-    const col  = sym === 'TWD=X' ? 'exchange_rates' : 'price_history';
-    const snap = await db.collection(col).doc(sym).get();
-    if (snap.exists) {
-      data[sym] = snap.data();
-    } else {
-      const fetched = await fetchAndSaveMarketData(sym, log);
-      if (fetched) data[sym] = fetched;
+    for (const symbol of allSymbols) {
+        const docRef = db.collection(symbol === "TWD=X" ? "exchange_rates" : "price_history").doc(symbol);
+        const doc = await docRef.get();
+
+        if (doc.exists) {
+            log(`Found ${symbol} in Firestore.`);
+            marketData[symbol] = doc.data();
+        } else {
+            log(`Data for ${symbol} not found. Performing emergency fetch...`);
+            const fetchedData = await fetchAndSaveMarketData(symbol, log);
+            if (fetchedData) {
+                marketData[symbol] = fetchedData;
+                await docRef.set(fetchedData);
+                log(`Successfully fetched and saved data for ${symbol}.`);
+            }
+        }
     }
-  }
-  return data;
+    return marketData;
 }
 
-/* ────── XIRR ────── */
+async function fetchAndSaveMarketData(symbol, log) {
+    try {
+        log(`[Fetch] Fetching full history for ${symbol} from Yahoo Finance...`);
+        const queryOptions = { period1: '2000-01-01' };
+        const hist = await yahooFinance.historical(symbol, queryOptions);
+
+        if (!hist || hist.length === 0) {
+            log(`[Fetch] Warning: No data returned for ${symbol}.`);
+            return null;
+        }
+
+        log(`[Fetch] Received ${hist.length} data points for ${symbol}.`);
+
+        const prices = {};
+        hist.forEach(item => {
+            prices[item.date.toISOString().split('T')[0]] = item.close;
+        });
+
+        const payload = {
+            prices: prices,
+            splits: {}, // We no longer store splits from yfinance
+            dividends: (hist.dividends || []).reduce((acc, d) => ({ ...acc, [d.date.toISOString().split('T')[0]]: d.amount }), {}),
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            dataSource: 'emergency-fetch-user-split-model-v2'
+        };
+
+        if (symbol === 'TWD=X') {
+            payload.rates = payload.prices;
+            delete payload.dividends;
+        }
+
+        return payload;
+    } catch (e) {
+        log(`[Fetch Error] for ${symbol}: ${e.message}`);
+        return null;
+    }
+}
+
 function calculateXIRR(cashflows) {
-  if (cashflows.length < 2) return 0;
-  const v = cashflows.map(c => c.amount);
-  const d = cashflows.map(c => c.date);
-  const yrs = d.map(t => (t - d[0]) / (365 * 24 * 60 * 60 * 1000));
+    if (cashflows.length < 2) return 0;
 
-  const f  = r => v.reduce((s,x,i)=>s + x/Math.pow(1+r,yrs[i]),0);
-  const fp = r => v.reduce((s,x,i)=>s - x*yrs[i]/Math.pow(1+r,yrs[i]+1),0);
+    // Separate values and dates
+    const values = cashflows.map(cf => cf.amount);
+    const dates = cashflows.map(cf => cf.date);
 
-  let r = 0.1;
-  for (let i=0;i<100;i++){
-    const y = f(r), yd = fp(r);
-    if (Math.abs(yd) < 1e-9) return 0;
-    const r2 = r - y/yd;
-    if (Math.abs(r2 - r) < 1e-6) return r2;
-    r = r2;
-  }
-  return r;
-}
+    // Find the time difference in years from the first transaction
+    const yearFractions = dates.map(date => (date.getTime() - dates[0].getTime()) / (1000 * 60 * 60 * 24 * 365));
 
-/* ────── 計算流程 ────── */
-function createCashflows(events, portfolio, finalHoldings, marketData){
-  const cf=[];
-  /* 交易 */
-  events.filter(e=>e.eventType==='transaction').forEach(t=>{
-    const fx  = findNearestDataPoint(marketData['TWD=X']?.rates||{}, t.date);
-    const dir = t.type==='buy'? -1 : 1;
-    const raw = t.totalCost || t.quantity * t.price;
-    const amt = Math.abs(raw)*(t.currency==='USD'?fx:1)*dir;
-    cf.push({date:new Date(t.date), amount:amt});
-  });
-  /* 配息 */
-  events.filter(e=>e.eventType==='dividend').forEach(dv=>{
-    const fx = findNearestDataPoint(marketData['TWD=X']?.rates||{}, dv.date);
-    const cur    = portfolio[dv.symbol]?.currency || 'USD';
-    const shares = portfolio[dv.symbol]?.lots.reduce((s,l)=>s+l.quantity,0) || 0;
-    const amt = dv.amount * shares * (cur==='USD'?fx:1);
-    if (amt!==0) cf.push({date:new Date(dv.date), amount:amt});
-  });
-  /* 期末市值 */
-  const mv = Object.values(finalHoldings).reduce((s,h)=>s+h.marketValueTWD,0);
-  cf.push({date:new Date(), amount:mv});
-  return cf;
-}
-
-function calculateFinalHoldings(portfolio, marketData){
-  const res={}, today=new Date();
-  const fx=findNearestDataPoint(marketData['TWD=X']?.rates||{}, today);
-
-  for (const sym in portfolio){
-    const qty=portfolio[sym].lots.reduce((s,l)=>s+l.quantity,0);
-    if (qty<1e-9) continue;
-
-    const costTWD = portfolio[sym].lots.reduce((s,l)=>s+l.quantity*l.pricePerShareTWD,0);
-    const costOrg = portfolio[sym].lots.reduce((s,l)=>s+l.quantity*l.pricePerShareOriginal,0);
-    const price   = findNearestDataPoint(marketData[sym]?.prices||{}, today);
-    const rate    = portfolio[sym].currency==='USD'?fx:1;
-    const mvTWD   = qty*price*rate;
-
-    res[sym] = {
-      symbol: sym,
-      quantity: qty,
-      avgCostOriginal: costOrg/qty,
-      totalCostTWD: costTWD,
-      currency: portfolio[sym].currency,
-      currentPriceOriginal: price,
-      marketValueTWD: mvTWD,
-      unrealizedPLTWD: mvTWD - costTWD,
-      returnRate: costTWD ? (mvTWD-costTWD)/costTWD*100 : 0
+    // NPV function
+    const npv = (rate) => {
+        let result = 0;
+        for (let i = 0; i < values.length; i++) {
+            result += values[i] / Math.pow(1 + rate, yearFractions[i]);
+        }
+        return result;
     };
-  }
-  return res;
-}
 
-function calculatePortfolioHistory(events, marketData){
-  const tx = events.filter(e=>e.eventType==='transaction');
-  if (tx.length===0) return {};
-  const first=new Date(tx[0].date), today=new Date();
-  let cur=new Date(first); cur.setUTCHours(0,0,0,0);
-  const hist={};
-  while(cur<=today){
-    const key=cur.toISOString().slice(0,10);
-    const state=getPortfolioStateOnDate(events, cur);
-    hist[key]=calculateDailyMarketValue(state, marketData, cur);
-    cur.setDate(cur.getDate()+1);
-  }
-  return hist;
-}
-
-function getPortfolioStateOnDate(events, date){
-  const state={}, rel=events.filter(e=>new Date(e.date)<=date);
-  const splits=events.filter(e=>e.eventType==='split');
-
-  for (const e of rel){
-    const sym=e.symbol.toUpperCase();
-    if(!state[sym]) state[sym]={lots:[],currency:'USD'};
-
-    switch(e.eventType){
-      case 'transaction':
-        state[sym].currency=e.currency;
-        if(e.type==='buy'){
-          state[sym].lots.push({quantity:e.quantity});
-        }else{
-          let qty=e.quantity;
-          while(qty>0 && state[sym].lots.length){
-            const lot=state[sym].lots[0];
-            if(lot.quantity<=qty){qty-=lot.quantity;state[sym].lots.shift();}
-            else{lot.quantity-=qty;qty=0;}
-          }
+    // Derivative of NPV function
+    const derivative = (rate) => {
+        let result = 0;
+        for (let i = 0; i < values.length; i++) {
+            if (yearFractions[i] > 0) { // Avoid division by zero for the first transaction
+                result -= values[i] * yearFractions[i] / Math.pow(1 + rate, yearFractions[i] + 1);
+            }
         }
-        break;
-      case 'split':
-        state[sym].lots.forEach(l=>{l.quantity*=e.ratio;});
-        break;
-    }
-  }
-  /* 調整未來拆股 */
-  for(const sym in state){
-    const fut=splits.filter(s=>s.symbol.toUpperCase()===sym && new Date(s.date)>date);
-    fut.forEach(s=>state[sym].lots.forEach(l=>l.quantity*=s.ratio));
-  }
-  return state;
-}
+        return result;
+    };
 
-function calculateDailyMarketValue(portfolio, marketData, date){
-  let tot=0;
-  const fx=findNearestDataPoint(marketData['TWD=X']?.rates||{}, date);
-  for(const sym in portfolio){
-    const qty=portfolio[sym].lots.reduce((s,l)=>s+l.quantity,0);
-    if(!qty) continue;
-    const price=findNearestDataPoint(marketData[sym]?.prices||{}, date);
-    const rate=portfolio[sym].currency==='USD'?fx:1;
-    tot += qty*price*rate;
-  }
-  return tot;
-}
+    // Newton-Raphson method to find the root (XIRR)
+    let guess = 0.1; // Initial guess
+    const tolerance = 1e-6;
+    const maxIterations = 100;
 
-function calculatePortfolio(transactions,splits,marketData,log){
-  const ev=[];
-  transactions.forEach(t=>ev.push({...t,date:t.date.toDate? t.date.toDate():new Date(t.date),eventType:'transaction'}));
-  splits.forEach(s=>ev.push({...s,date:s.date.toDate? s.date.toDate():new Date(s.date),eventType:'split'}));
+    for (let i = 0; i < maxIterations; i++) {
+        const npvValue = npv(guess);
+        const derivativeValue = derivative(guess);
 
-  const syms=[...new Set(transactions.map(t=>t.symbol.toUpperCase()))];
-  syms.forEach(sym=>{
-    const divs=marketData[sym]?.dividends||{};
-    Object.entries(divs).forEach(([d,amt])=>ev.push({date:new Date(d),symbol:sym,amount:amt,eventType:'dividend'}));
-  });
-  ev.sort((a,b)=>new Date(a.date)-new Date(b.date));
-
-  const pf={}, rateHist=marketData['TWD=X']?.rates||{};
-  let realized=0;
-
-  for(const e of ev){
-    const sym=e.symbol.toUpperCase();
-    if(!pf[sym]) pf[sym]={lots:[],currency:'USD'};
-    const fx=findNearestDataPoint(rateHist, e.date);
-
-    switch(e.eventType){
-      case 'transaction': {
-        const costOrg=e.totalCost||e.price;
-        const costTWD=costOrg*(e.currency==='USD'?fx:1);
-        pf[sym].currency=e.currency;
-
-        if(e.type==='buy'){
-          pf[sym].lots.push({quantity:e.quantity,pricePerShareOriginal:costOrg,pricePerShareTWD:costTWD});
-        }else{
-          let qty=e.quantity, costSold=0;
-          const saleTWD=(e.totalCost||e.quantity*e.price)*(e.currency==='USD'?fx:1);
-          while(qty>0 && pf[sym].lots.length){
-            const lot=pf[sym].lots[0];
-            if(lot.quantity<=qty){costSold+=lot.quantity*lot.pricePerShareTWD;qty-=lot.quantity;pf[sym].lots.shift();}
-            else{costSold+=qty*lot.pricePerShareTWD;lot.quantity-=qty;qty=0;}
-          }
-          realized+=saleTWD - costSold;
+        if (Math.abs(derivativeValue) < 1e-9) { // Avoid division by zero
+            break;
         }
-        break;}
-      case 'split':
-        if(typeof e.ratio!=='number'||e.ratio<=0){log(`bad split ${sym}`);break;}
-        pf[sym].lots.forEach(l=>{l.quantity*=e.ratio;l.pricePerShareOriginal/=e.ratio;l.pricePerShareTWD/=e.ratio;});
-        break;
-      case 'dividend':
-        const shares=pf[sym].lots.reduce((s,l)=>s+l.quantity,0);
-        realized+=e.amount*shares*(pf[sym].currency==='USD'?fx:1);
-        break;
-    }
-  }
 
-  const holdings=calculateFinalHoldings(pf,marketData);
-  const hist=calculatePortfolioHistory(ev,marketData);
-  const xirr=calculateXIRR(createCashflows(ev,pf,holdings,marketData));
-  return {holdings,totalRealizedPL:realized,portfolioHistory:hist,xirr};
-}
+        const newGuess = guess - npvValue / derivativeValue;
 
-/* ────── Recalculation main ────── */
-async function performRecalculation(userId){
-  const logRef=db.doc(`users/${userId}/user_data/calculation_logs`);
-  const logs=[], log=m=>{const ts=new Date().toISOString();logs.push(`${ts} ${m}`);console.log(`[${userId}] ${m}`);};
+        if (Math.abs(newGuess - guess) < tolerance) {
+            return newGuess;
+        }
 
-  try{
-    const [txSnap, spSnap] = await Promise.all([
-      db.collection(`users/${userId}/transactions`).get(),
-      db.collection(`users/${userId}/splits`).get()
-    ]);
-    const tx=txSnap.docs.map(d=>({id:d.id,...d.data()}));
-    const sp=spSnap.docs.map(d=>({id:d.id,...d.data()}));
-
-    if(tx.length===0){
-      await db.doc(`users/${userId}/user_data/current_holdings`)
-        .set({holdings:{},totalRealizedPL:0,xirr:0,
-              lastUpdated:admin.firestore.FieldValue.serverTimestamp(),
-              force_recalc_timestamp:admin.firestore.FieldValue.delete()});
-      return;
+        guess = newGuess;
     }
 
-    const mkt=await getMarketDataFromDb(tx,log);
-    const {holdings,totalRealizedPL,portfolioHistory,xirr}=calculatePortfolio(tx,sp,mkt,log);
-
-    await Promise.all([
-      db.doc(`users/${userId}/user_data/current_holdings`)
-        .set({holdings,totalRealizedPL,xirr,
-              lastUpdated:admin.firestore.FieldValue.serverTimestamp(),
-              force_recalc_timestamp:admin.firestore.FieldValue.delete()},{merge:true}),
-      db.doc(`users/${userId}/user_data/portfolio_history`)
-        .set({history:portfolioHistory,
-              lastUpdated:admin.firestore.FieldValue.serverTimestamp()})
-    ]);
-  }catch(e){console.error(e);logs.push(`ERR ${e.message}`);}
-  finally{await logRef.set({entries:logs});}
+    return guess; // Return the best guess if it doesn't converge
 }
 
-/* ────── Firestore 觸發器 ────── */
+function calculatePortfolio(transactions, userSplits, marketData, log) {
+    const events = [];
+    const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
-/* 1. current_holdings：create / timestamp 變更 */
-exports.recalculatePortfolio = functions
-  .runWith({timeoutSeconds:300, memory:'1GB'})
-  .firestore.document('users/{uid}/user_data/current_holdings')
-  .onWrite((chg,ctx)=>{
-    if(!chg.after.exists) return null;
-    const created=!chg.before.exists;
-    const before = chg.before.data()||{};
-    const after  = chg.after.data()||{};
-    const tsChanged = after.force_recalc_timestamp &&
-      (!before.force_recalc_timestamp ||
-       after.force_recalc_timestamp.toMillis() !==
-       before.force_recalc_timestamp.toMillis());
-    if(created || tsChanged) return performRecalculation(ctx.params.uid);
-    return null;
-  });
+    for (const t of transactions) {
+        events.push({ ...t, date: t.date.toDate ? t.date.toDate() : new Date(t.date), eventType: 'transaction' });
+    }
+    for (const split of userSplits) {
+        events.push({ ...split, date: split.date.toDate ? split.date.toDate() : new Date(split.date), eventType: 'split' });
+    }
+    for (const symbol of symbols) {
+        const stockData = marketData[symbol];
+        if (!stockData) continue;
+        Object.entries(stockData.dividends || {}).forEach(([date, amount]) => {
+            events.push({ date: new Date(date), symbol, amount, eventType: 'dividend' });
+        });
+    }
+    events.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-/* 2. 交易 */
-exports.recalculateOnTransaction = functions.firestore
-  .document('users/{uid}/transactions/{tid}')
-  .onWrite((_,ctx)=>
-    db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
-      .set({force_recalc_timestamp:admin.firestore.FieldValue.serverTimestamp()},{merge:true})
-  );
+    const portfolio = {};
+    let totalRealizedPL = 0;
 
-/* 3. 拆股 */
-exports.recalculateOnSplit = functions.firestore
-  .document('users/{uid}/splits/{sid}')
-  .onWrite((_,ctx)=>{
-    db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
-      .set({force_recalc_timestamp:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
-    return performRecalculation(ctx.params.uid);
-  });
+    for (const event of events) {
+        const symbol = event.symbol.toUpperCase();
+        if (!portfolio[symbol]) {
+            portfolio[symbol] = { lots: [], currency: 'USD' };
+        }
 
-/* 4. price_history */
-exports.recalculateOnPriceUpdate = functions
-  .runWith({timeoutSeconds:240, memory:'1GB'})
-  .firestore.document('price_history/{symbol}')
-  .onWrite(async (chg,ctx)=>{
-    const sym=ctx.params.symbol.toUpperCase();
-    const bef=chg.before.exists?chg.before.data():null;
-    const aft=chg.after.data();
-    if(bef &&
-       JSON.stringify(bef.prices)===JSON.stringify(aft.prices) &&
-       JSON.stringify(bef.dividends)===JSON.stringify(aft.dividends)) return null;
+        const rateHistory = marketData["TWD=X"]?.rates || {};
+        const rateOnDate = findNearestDataPoint(rateHistory, event.date);
 
-    const txSnap=await db.collectionGroup('transactions').where('symbol','==',sym).get();
-    const users=[...new Set(txSnap.docs.map(d=>d.ref.path.split('/')[1]))];
-    const ts=admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all(users.map(u=>
-      db.doc(`users/${u}/user_data/current_holdings`)
-        .set({force_recalc_timestamp:ts},{merge:true})
-    ));
-    return null;
-  });
+        switch (event.eventType) {
+            case 'transaction':
+                const t = event;
+                portfolio[symbol].currency = t.currency;
+                const costPerShareOriginal = (t.totalCost || t.price);
+                const costPerShareTWD = costPerShareOriginal * (t.currency === 'USD' ? rateOnDate : 1);
 
-/* 5. 匯率 */
-exports.recalculateOnFxUpdate = functions
-  .runWith({timeoutSeconds:240, memory:'1GB'})
-  .firestore.document('exchange_rates/TWD=X')
-  .onWrite(async (chg)=>{
-    const bef=chg.before.exists?chg.before.data():null;
-    const aft=chg.after.data();
-    if(bef && JSON.stringify(bef.rates)===JSON.stringify(aft.rates)) return null;
-    const users=await db.collection('users').listDocuments();
-    const ts=admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all(users.map(u=>
-      db.doc(`users/${u.id}/user_data/current_holdings`)
-        .set({force_recalc_timestamp:ts},{merge:true})
-    ));
-    return null;
-  });
+                if (t.type === 'buy') {
+                    portfolio[symbol].lots.push({ quantity: t.quantity, pricePerShareTWD: costPerShareTWD, pricePerShareOriginal: costPerShareOriginal, date: event.date });
+                } else if (t.type === 'sell') {
+                    let sharesToSell = t.quantity;
+                    const saleValueTWD = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
+                    let costOfSoldSharesTWD = 0;
+                    while (sharesToSell > 0 && portfolio[symbol].lots.length > 0) {
+                        const firstLot = portfolio[symbol].lots[0];
+                        if (firstLot.quantity <= sharesToSell) {
+                            costOfSoldSharesTWD += firstLot.quantity * firstLot.pricePerShareTWD;
+                            sharesToSell -= firstLot.quantity;
+                            portfolio[symbol].lots.shift();
+                        } else {
+                            costOfSoldSharesTWD += sharesToSell * firstLot.pricePerShareTWD;
+                            firstLot.quantity -= sharesToSell;
+                            sharesToSell = 0;
+                        }
+                    }
+                    totalRealizedPL += saleValueTWD - costOfSoldSharesTWD;
+                }
+                break;
+
+            case 'split':
+                portfolio[symbol].lots.forEach(lot => { 
+                    lot.quantity *= event.ratio;
+                    lot.pricePerShareOriginal /= event.ratio;
+                    lot.pricePerShareTWD /= event.ratio;
+                });
+                break;
+
+            case 'dividend':
+                const totalShares = portfolio[symbol].lots.reduce((sum, lot) => sum + lot.quantity, 0);
+                const dividendTWD = event.amount * totalShares * (portfolio[symbol].currency === 'USD' ? rateOnDate : 1);
+                totalRealizedPL += dividendTWD;
+                break;
+        }
+    }
+
+    const finalHoldings = calculateFinalHoldings(portfolio, marketData);
+    const portfolioHistory = calculatePortfolioHistory(events, marketData);
+    const cashflows = createCashflows(events, portfolio, finalHoldings, marketData);
+    const xirr = calculateXIRR(cashflows);
+
+    return { holdings: finalHoldings, totalRealizedPL, portfolioHistory, xirr };
+}
+
+function createCashflows(events, portfolio, finalHoldings, marketData) {
+    const cashflows = [];
+
+    // Add buy/sell transactions to cashflows
+    events.filter(e => e.eventType === 'transaction').forEach(t => {
+        const rateHistory = marketData["TWD=X"]?.rates || {};
+        const rateOnDate = findNearestDataPoint(rateHistory, t.date);
+        const amount = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
+
+        cashflows.push({
+            date: new Date(t.date),
+            amount: t.type === 'buy' ? -amount : amount
+        });
+    });
+
+    // Add dividends to cashflows
+    events.filter(e => e.eventType === 'dividend').forEach(d => {
+        const rateHistory = marketData["TWD=X"]?.rates || {};
+        const rateOnDate = findNearestDataPoint(rateHistory, d.date);
+        // Correctly get the currency from the portfolio state at that time
+        const holdingCurrency = portfolio[d.symbol]?.currency || 'USD'; 
+        const totalSharesOnDate = portfolio[d.symbol]?.lots.reduce((sum, lot) => sum + lot.quantity, 0) || 0;
+        const amount = d.amount * totalSharesOnDate * (holdingCurrency === 'USD' ? rateOnDate : 1);
+
+        if (amount > 0) {
+            cashflows.push({
+                date: new Date(d.date),
+                amount: amount
+            });
+        }
+    });
+
+    // Add current market value as the final cashflow
+    const totalMarketValue = Object.values(finalHoldings).reduce((sum, h) => sum + h.marketValueTWD, 0);
+    if (totalMarketValue > 0) {
+        cashflows.push({
+            date: new Date(),
+            amount: totalMarketValue
+        });
+    }
+
+    return cashflows;
+}
+
+function calculatePortfolioHistory(events, marketData) {
+    const portfolioHistory = {};
+    const transactionEvents = events.filter(e => e.eventType === 'transaction');
+    if (transactionEvents.length === 0) return {};
+    
+    const firstDate = new Date(transactionEvents[0].date);
+    const today = new Date();
+    let currentDate = new Date(firstDate);
+    currentDate.setUTCHours(0, 0, 0, 0);
+
+    while (currentDate <= today) {
+        const dateStr = currentDate.toISOString().split('T')[0];
+        const dailyPortfolioState = getPortfolioStateOnDate(events, currentDate);
+        portfolioHistory[dateStr] = calculateDailyMarketValue(dailyPortfolioState, marketData, currentDate);
+        currentDate.setDate(currentDate.getDate() + 1);
+    }
+    return portfolioHistory;
+}
+
+function getPortfolioStateOnDate(allEvents, targetDate) {
+    const portfolioState = {};
+    
+    // 1. Filter events to the target date to get the state AT that date
+    const relevantEvents = allEvents.filter(e => new Date(e.date) <= targetDate);
+    
+    // 2. Get all split events to adjust for future splits
+    const allSplitEvents = allEvents.filter(e => e.eventType === 'split');
+
+    for (const event of relevantEvents) {
+        const symbol = event.symbol.toUpperCase();
+        if (!portfolioState[symbol]) {
+            portfolioState[symbol] = { lots: [], currency: 'USD' };
+        }
+
+        switch (event.eventType) {
+            case 'transaction':
+                const t = event;
+                portfolioState[symbol].currency = t.currency;
+                if (t.type === 'buy') {
+                    portfolioState[symbol].lots.push({ quantity: t.quantity, date: event.date });
+                } else if (t.type === 'sell') {
+                    let sharesToSell = t.quantity;
+                    while (sharesToSell > 0 && portfolioState[symbol].lots.length > 0) {
+                        const firstLot = portfolioState[symbol].lots[0];
+                        if (firstLot.quantity <= sharesToSell) {
+                            sharesToSell -= firstLot.quantity;
+                            portfolioState[symbol].lots.shift();
+                        } else {
+                            firstLot.quantity -= sharesToSell;
+                            sharesToSell = 0;
+                        }
+                    }
+                }
+                break;
+            case 'split':
+                // This logic now correctly applies splits as they happen chronologically
+                portfolioState[symbol].lots.forEach(lot => { 
+                    lot.quantity *= event.ratio; 
+                    // We also need to adjust the cost basis to maintain correct total cost
+                    if (lot.pricePerShareOriginal) lot.pricePerShareOriginal /= event.ratio;
+                    if (lot.pricePerShareTWD) lot.pricePerShareTWD /= event.ratio;
+                });
+                break;
+        }
+    }
+
+    // 3. Adjust the quantity for splits that happened AFTER the targetDate
+    // This is the key change to align quantities with forward-adjusted prices
+    for (const symbol in portfolioState) {
+        const futureSplits = allSplitEvents.filter(s => s.symbol.toUpperCase() === symbol && new Date(s.date) > targetDate);
+        for (const split of futureSplits) {
+            portfolioState[symbol].lots.forEach(lot => {
+                lot.quantity *= split.ratio;
+            });
+        }
+    }
+
+    return portfolioState;
+}
+
+function calculateDailyMarketValue(portfolio, marketData, date) {
+    let totalValue = 0;
+    const rateOnDate = findNearestDataPoint(marketData["TWD=X"]?.rates || {}, date);
+
+    for (const symbol in portfolio) {
+        const holding = portfolio[symbol];
+        const totalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+
+        if (totalQuantity > 0) {
+            const priceHistory = marketData[symbol]?.prices || {};
+            const priceOnDate = findNearestDataPoint(priceHistory, date);
+            const rate = holding.currency === 'USD' ? rateOnDate : 1;
+            totalValue += totalQuantity * priceOnDate * rate;
+        }
+    }
+    return totalValue;
+}
+
+function calculateFinalHoldings(portfolio, marketData) {
+    const finalHoldings = {};
+    const today = new Date();
+    const latestRate = findNearestDataPoint(marketData["TWD=X"]?.rates || {}, today);
+
+    for (const symbol in portfolio) {
+        const holding = portfolio[symbol];
+        const totalQuantity = holding.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+
+        if (totalQuantity > 1e-9) {
+            const totalCostTWD = holding.lots.reduce((sum, lot) => sum + (lot.quantity * lot.pricePerShareTWD), 0);
+            const totalCostOriginal = holding.lots.reduce((sum, lot) => sum + (lot.quantity * lot.pricePerShareOriginal), 0);
+
+            const priceHistory = marketData[symbol]?.prices || {};
+            const latestPriceOriginal = findNearestDataPoint(priceHistory, today);
+            const rate = holding.currency === 'USD' ? latestRate : 1;
+            
+            const marketValueTWD = totalQuantity * latestPriceOriginal * rate;
+            const unrealizedPLTWD = marketValueTWD - totalCostTWD;
+
+            finalHoldings[symbol] = {
+                symbol: symbol,
+                quantity: totalQuantity,
+                avgCostOriginal: totalCostOriginal > 0 ? totalCostOriginal / totalQuantity : 0,
+                totalCostTWD: totalCostTWD,
+                currency: holding.currency,
+                currentPriceOriginal: latestPriceOriginal,
+                marketValueTWD: marketValueTWD,
+                unrealizedPLTWD: unrealizedPLTWD,
+                returnRate: totalCostTWD > 0 ? (unrealizedPLTWD / totalCostTWD) * 100 : 0,
+            };
+        }
+    }
+    return finalHoldings;
+}
+
+function findNearestDataPoint(history, targetDate) {
+    if (!history || Object.keys(history).length === 0) return 1;
+
+    const d = new Date(targetDate);
+    d.setUTCHours(12, 0, 0, 0);
+
+    for (let i = 0; i < 7; i++) {
+        const searchDate = new Date(d);
+        searchDate.setDate(searchDate.getDate() - i);
+        const dateStr = searchDate.toISOString().split('T')[0];
+        if (history[dateStr] !== undefined) {
+            return history[dateStr];
+        }
+    }
+
+    const sortedDates = Object.keys(history).sort();
+    const targetDateStr = d.toISOString().split('T')[0];
+    let closestDate = null;
+    for (const dateStr of sortedDates) {
+        if (dateStr <= targetDateStr) {
+            closestDate = dateStr;
+        } else {
+            break;
+        }
+    }
+    if (closestDate) {
+        return history[closestDate];
+    }
+
+    console.warn(`Could not find any historical data point for date: ${targetDateStr}`);
+    return 1;
+}
