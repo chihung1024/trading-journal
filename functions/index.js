@@ -402,7 +402,11 @@ function createCashflows(events, portfolio, finalHoldings, marketData) {
     events.filter(e => e.eventType === 'transaction').forEach(t => {
         const rateHistory = marketData["TWD=X"]?.rates || {};
         const rateOnDate = findNearestDataPoint(rateHistory, t.date);
-        const amount = (t.totalCost || t.quantity * t.price) * (t.currency === 'USD' ? rateOnDate : 1);
+        
+        //刪除這行，新增三行 const amount = (t.totalCost || t.quantity * t.price) *(t.currency === 'USD' ? rateOnDate : 1);
+        const signed  = t.type === 'buy' ? -1 : 1;
+        const raw     = t.totalCost || t.quantity * t.price;
+        const amount  = Math.abs(raw) *(t.currency === 'USD' ? rateOnDate : 1) *signed;
 
         cashflows.push({
             date: new Date(t.date),
