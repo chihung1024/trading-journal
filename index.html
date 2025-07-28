@@ -100,7 +100,6 @@
         import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
         import { getFirestore, collection, doc, addDoc, onSnapshot, updateDoc, deleteDoc, query, orderBy, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-        import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js";
 
         // =================================================================================
         // === 步驟 1: 請將您從 Firebase 專案複製的 firebaseConfig 物件貼到此處 ===
@@ -116,7 +115,7 @@
         // =================================================================================
 
         // --- 全域變數 ---
-        let db, auth, functions;
+        let db, auth;
         let transactions = [];
         let userSplits = [];
         let holdings = {};
@@ -149,7 +148,6 @@
                 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
                 auth = getAuth(app);
                 db = getFirestore(app);
-                functions = getFunctions(app);
                 setupEventListeners();
                 initializeChart();
                 lucide.createIcons();
@@ -499,10 +497,6 @@
                 }
                 closeModal();
                 showNotification('success', id ? '交易已更新！' : '交易已新增！');
-                
-                // Call the new recalculate function
-                const recalculate = httpsCallable(functions, 'recalculatePortfolio');
-                await recalculate({ userId: userId });
                 showNotification('info', `後端正在為您即時更新資產數據...`);
 
             } catch (error) {
