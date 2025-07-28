@@ -1,33 +1,85 @@
 /*  ────────────────────────────────────────────────────────────────
  *  index.js  —  Cloud Functions for Portfolio Calc
- *  Version : v33  (2025-07-28)
+ *  Version : v35  (2025-07-28)
  *  Author  : <you>
- *  變更重點：
- *    1. 兩階段鎖  _calc_lock
- *    2. recalc_queue 取代 force_recalc_timestamp
- *    3. O(N) 現金流計算，刪除 runSharesPerEvent
- *    4. 幣別判斷正確、Realized P/L 修正
- *    5. FIFO oversell 防呆
+ *
+ *  變更摘要 v35
+ *    1. markRecalc 改寫：1 秒內僅丟棄、佇列永遠遞增
+ *    2. releaseLock 直接 delete 文件，避免殘骸
+ *    3. 拆股邏輯修正：僅調 qty / 單位成本，總成本不變
+ *    4. Oversell Map：回傳缺口數量與 txId
+ *    5. getMarketData 快取 → getAll 批次抓取
+ *    6. _calc_lock 新增 stage，前端可顯示進度
+ *    7. 其它小幅優化（函式名稱、型別檢查 …）
  *  ─────────────────────────────────────────────────────────────── */
 
 'use strict';
 
-const functions     = require('firebase-functions');
-const admin         = require('firebase-admin');
-const yahooFinance  = require('yahoo-finance2').default;
+const functions    = require('firebase-functions');
+const admin        = require('firebase-admin');
+const yahooFinance = require('yahoo-finance2').default;
+const zlib         = require('zlib');
 
 admin.initializeApp();
 const db = admin.firestore();
 
 /* ──────────────────────────── Util ────────────────────────────── */
 
-/** 佇列＋1，確保「至少一次」重算 (de-bounce 免 2 秒規則) */
+/** 交易或股價異動後「至少一次」排入重算佇列（1 秒節流） */
 async function markRecalc(uid) {
   const ref = db.doc(`users/${uid}/user_data/current_holdings`);
-  await ref.set(
-    { recalc_queue: admin.firestore.FieldValue.increment(1) },
-    { merge: true }
+  const now = Date.now();
+
+  await db.runTransaction(async txn => {
+    const snap = await txn.get(ref);
+    const data = snap.exists ? snap.data() : {};
+    const last = data.__lastMarked ?? 0;
+
+    // 1 秒以內丟棄重複請求
+    if (now - last < 1_000) return;
+
+    txn.set(
+      ref,
+      {
+        recalc_queue: admin.firestore.FieldValue.increment(1),
+        __lastMarked: now
+      },
+      { merge: true }
+    );
+  });
+}
+
+/* ──────────────── 計算鎖：逾時 + stage ───────────────────────── */
+
+async function acquireLock(uid) {
+  const ref      = db.doc(`users/${uid}/user_data/_calc_lock`);
+  const now      = admin.firestore.Timestamp.now();
+  const expireAt = admin.firestore.Timestamp.fromMillis(
+    now.toMillis() + 10 * 60 * 1_000
   );
+
+  return db.runTransaction(async txn => {
+    const doc = await txn.get(ref);
+    if (doc.exists) {
+      const d = doc.data();
+      if (!d.finishedAt && d.expireAt?.toMillis() > now.toMillis()) {
+        return false; // 仍被鎖定
+      }
+    }
+    txn.set(ref, { startedAt: now, expireAt, stage: 'init' });
+    return true;
+  });
+}
+
+async function setStage(uid, stage) {
+  return db.doc(`users/${uid}/user_data/_calc_lock`)
+           .update({ stage })
+           .catch(() => {});
+}
+
+async function releaseLock(uid) {
+  // 直接刪除，省去殘骸文件
+  await db.doc(`users/${uid}/user_data/_calc_lock`).delete().catch(() => {});
 }
 
 /* ────────────────────────── Triggers ─────────────────────────── */
@@ -37,11 +89,11 @@ exports.recalculatePortfolio = functions
   .firestore
   .document('users/{userId}/user_data/current_holdings')
   .onUpdate(async (change, context) => {
-    const { userId }  = context.params;
-    const beforeCnt   = change.before.data()?.recalc_queue ?? 0;
-    const afterCnt    = change.after.data()?.recalc_queue ?? 0;
+    const { userId } = context.params;
+    const beforeCnt  = change.before.data()?.recalc_queue ?? 0;
+    const afterCnt   = change.after.data()?.recalc_queue ?? 0;
 
-    if (afterCnt <= beforeCnt) return null;   // 無新增佇列
+    if (afterCnt <= beforeCnt) return null;          // 佇列並未增加
     console.log(`[${userId}] queue +${afterCnt - beforeCnt}`);
 
     await performRecalculation(userId);
@@ -107,21 +159,26 @@ exports.recalculateOnFxUpdate = functions
 /* ───────────────────────  Main Recalc  ───────────────────────── */
 
 async function performRecalculation(userId) {
-  const busyRef = db.doc(`users/${userId}/user_data/_calc_lock`);
-  const lockDoc = await busyRef.get();
-  if (lockDoc.exists) {
-    console.log(`[${userId}] already running, skip`);
+  if (!(await acquireLock(userId))) {
+    console.log(`[${userId}] busy, skip`);
     return;
   }
-  await busyRef.set({ startedAt: admin.firestore.Timestamp.now() });
-
-  const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
-  const logs = []; const log = (m) => { console.log(m); logs.push(m); };
 
   try {
-    log(`─── Recalc v33 start (${userId}) ───`);
+    await setStage(userId, 'loading');
 
-    /* 1. 讀取資料 */
+    const holdingsRef = db.doc(`users/${userId}/user_data/current_holdings`);
+    const historyRef  = db.doc(`users/${userId}/user_data/portfolio_history`);
+    const brokenRef   = db.doc(`users/${userId}/user_data/broken_tx`);
+    const logRef      = db.doc(`users/${userId}/user_data/calculation_logs`);
+
+    let   logs   = [];
+    const log    = (m) => { console.log(m); logs.push(m); };
+    const oversellMap = new Map();
+
+    log(`─── Recalc v35 start (${userId}) ───`);
+
+    /* 1. 讀取交易 / 拆股資料 */
     const [txSnap, splitSnap] = await Promise.all([
       db.collection(`users/${userId}/transactions`).get(),
       db.collection(`users/${userId}/splits`).get()
@@ -130,98 +187,112 @@ async function performRecalculation(userId) {
     const transactions = txSnap.docs .map(d => ({ id: d.id,   ...d.data() }));
     const userSplits   = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    const holdingsRef = db.doc(`users/${userId}/user_data/current_holdings`);
-    const historyRef  = db.doc(`users/${userId}/user_data/portfolio_history`);
-
     if (!transactions.length) {
       log('No transactions → wipe');
-      await Promise.all([
-        holdingsRef.set({
-          holdings: {}, totalRealizedPL: 0, xirr: null,
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-          recalc_queue: 0
-        }),
-        historyRef.set({
-          history: {},
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-        })
-      ]);
+      const batch = db.batch();
+      batch.set(holdingsRef, {
+        holdings: {}, totalRealizedPL: 0, xirr: null,
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+        recalc_queue: 0
+      });
+      batch.set(historyRef, {
+        history: {},
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      });
+      batch.delete(brokenRef);
+      await batch.commit();
       return;
     }
 
     /* 2. 行情 */
+    await setStage(userId, 'pricing');
     const marketData = await getMarketDataFromDb(transactions, log);
     if (!Object.keys(marketData).length) throw new Error('marketData empty');
 
     /* 3. 計算 */
+    await setStage(userId, 'calculating');
     const {
       holdings, totalRealizedPL, portfolioHistory, xirr
-    } = calculatePortfolio(transactions, userSplits, marketData, log);
+    } = calculatePortfolio(transactions, userSplits, marketData, oversellMap, log);
 
-    /* 4. 寫回 */
-    const payload = {
+    /* 4. 寫回 (Batch) */
+    await setStage(userId, 'writing');
+    const batch = db.batch();
+
+    batch.set(holdingsRef, {
       holdings, totalRealizedPL, xirr,
       lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
       recalc_queue: 0
-    };
-    await Promise.all([
-      holdingsRef.set(payload, { merge: true }),
-      historyRef.set({
-        history: portfolioHistory,
-        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-      })
-    ]);
+    }, { merge: true });
+
+    batch.set(historyRef, {
+      history: portfolioHistory,
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    if (oversellMap.size) {
+      batch.set(brokenRef, {
+        items: [...oversellMap.entries()].map(([s,o]) => ({
+          symbol:  s,
+          missing: o.missing,
+          txId:    o.txId
+        })),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } else {
+      batch.delete(brokenRef);
+    }
+
+    // gzip 壓縮日誌
+    const zipped = zlib.gzipSync(Buffer.from(logs.join('\n'))).toString('base64');
+    batch.set(logRef, { entries: zipped, encoding: 'gzip' });
+
+    await batch.commit();
 
     log('─── Recalc OK ───');
   } catch (err) {
     console.error(`[${userId}]`, err);
-    logs.push(`ERROR: ${err.message}\n${err.stack}`);
+    const logRef = db.doc(`users/${userId}/user_data/calculation_logs`);
+    const body   = `ERROR: ${err.message}\n${err.stack}`;
+    const zipped = zlib.gzipSync(Buffer.from(body)).toString('base64');
+    await logRef.set({ entries: zipped, encoding: 'gzip' });
   } finally {
-    await busyRef.delete().catch(()=>{});
-    await logRef.set({ entries: logs });
+    await releaseLock(userId);
   }
 }
 
 /* ───────────────── Market Data (with cache) ─────────────────── */
 
 async function getMarketDataFromDb(transactions, log) {
-  const symbols  = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
-  const requests = [...new Set([...symbols, 'TWD=X'])];
+  // 1. 股票代號
+  const symbols = [...new Set(transactions.map(t => t.symbol.toUpperCase()))];
 
-  const CHUNK = 10, chunks = [];
-  for (let i = 0; i < requests.length; i += CHUNK)
-    chunks.push(requests.slice(i, i + CHUNK));
+  // 2. 貨幣代號（目前僅支援 USD，其餘視為 TWD = 1）
+  const currencies = [...new Set(transactions
+                      .map(t => (t.currency || 'USD').toUpperCase())
+                      .filter(c => c !== 'TWD' && c !== 'USD'))];
 
-  const results = {};
-  for (const chunk of chunks) {
-    const priceIds = chunk.filter(s => s !== 'TWD=X');
-    const fxIds    = chunk.filter(s => s === 'TWD=X');
+  const priceIds = symbols;                 // price_history/*
+  const fxIds    = ['TWD=X'];               // exchange_rates/*  (此處可擴充其他匯率)
 
-    const [priceSnap, fxSnap] = await Promise.all([
-      priceIds.length
-        ? db.collection('price_history')
-            .where(admin.firestore.FieldPath.documentId(), 'in', priceIds).get()
-        : Promise.resolve({ docs: [] }),
-      fxIds.length
-        ? db.collection('exchange_rates')
-            .where(admin.firestore.FieldPath.documentId(), 'in', fxIds).get()
-        : Promise.resolve({ docs: [] })
-    ]);
+  const results  = {};
 
-    [...priceSnap.docs, ...fxSnap.docs].forEach(doc => {
-      results[doc.id] = attachSearchers(doc.data());
-    });
+  // Firestore getAll => 一次 round-trip
+  const priceRefs = priceIds.map(id => db.collection('price_history').doc(id));
+  const fxRefs    = fxIds   .map(id => db.collection('exchange_rates').doc(id));
+  const snaps     = await db.getAll(...priceRefs, ...fxRefs);
 
-    /* emergency fetch */
-    const missing = chunk.filter(s => !results[s]);
-    for (const sym of missing) {
-      log(`Fetch missing ${sym}`);
-      const d = await fetchAndSaveMarketData(sym, log);
-      if (d) {
-        results[sym] = attachSearchers(d);
-        const coll = sym === 'TWD=X' ? 'exchange_rates' : 'price_history';
-        await db.collection(coll).doc(sym).set(d);
-      }
+  snaps.forEach(snap => { if (snap.exists) results[snap.id] = attachSearchers(snap.data()); });
+
+  // emergency fetch
+  const missing = [...priceIds, ...fxIds].filter(id => !results[id]);
+  for (const id of missing) {
+    log(`Fetch missing ${id}`);
+    const d = await fetchAndSaveMarketData(id, log);
+    if (d) {
+      results[id] = attachSearchers(d);
+      const coll = id.endsWith('=X') ? 'exchange_rates' : 'price_history';
+      await db.collection(coll).doc(id).set(d);
     }
   }
   return results;
@@ -243,7 +314,7 @@ async function fetchAndSaveMarketData(symbol, log) {
     const obj = {};
     hist.forEach(h => { obj[h.date.toISOString().slice(0,10)] = h.close; });
 
-    const payload = symbol === 'TWD=X'
+    const payload = symbol.endsWith('=X')
       ? { rates: obj }
       : { prices: obj, dividends: {}, splits: {} };
 
@@ -278,7 +349,7 @@ function buildSearcher(obj) {
 
 /* ──────────────────── Portfolio Calculation ─────────────────── */
 
-function calculatePortfolio(transactions, userSplits, marketData, log) {
+function calculatePortfolio(transactions, userSplits, marketData, oversellMap, log) {
   /* 1. 組合事件 (含股息) */
   const events = [];
 
@@ -307,12 +378,10 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
 
   events.sort((a,b) => a.date - b.date);
 
-  /* 2. 模擬持股 FIFO */
-  const lotsMap   = {};   // sym -> [{qty,costOrig,costTWD}]
-  const curMap    = {};   // sym -> 'USD' | 'TWD'
+  /* 2. FIFO 模擬 (lot 級別) */
+  const lotsMap   = {};   // sym -> { lots: [{qty,currency,cOrig,cTwd}], qty,cOrig,cTwd }
   const cashflows = [];
-
-  const rateFn = marketData['TWD=X']?.rateSearch || (()=>1);
+  const rateFn    = marketData['TWD=X']?.rateSearch || (()=>1);
 
   events.forEach(evt => {
     const sym = evt.symbol?.toUpperCase();
@@ -320,55 +389,86 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
 
       /* ── 交易 ── */
       case 'transaction': {
-        if (!lotsMap[sym]) lotsMap[sym] = [];
-        curMap[sym] = evt.currency || 'USD';
+        if (typeof evt.quantity !== 'number' || evt.quantity <= 0) {
+          log(`[SkipBadTx] ${evt.id}`);
+          break;
+        }
 
-        const isUSD  = curMap[sym] === 'USD';
-        const fxRate = isUSD ? rateFn(evt.date) : 1;
-        const costPS = evt.totalCost ? evt.totalCost/evt.quantity : evt.price;
-        const costTW = costPS * fxRate;
+        if (!lotsMap[sym])
+          lotsMap[sym] = { lots: [], qty:0, costOrig:0, costTwd:0 };
+
+        const isBuy   = evt.type === 'buy';
+        const cur     = (evt.currency || 'USD').toUpperCase();
+        const fxRate  = (cur === 'USD') ? rateFn(evt.date) : 1;
+        const costPS  = evt.totalCost ? evt.totalCost / evt.quantity : evt.price;
+        const costTW  = costPS * fxRate;
 
         /* 現金流 (買負賣正) */
         const amount = (evt.totalCost || evt.quantity*evt.price) * fxRate;
         cashflows.push({
           date: new Date(evt.date),
-          amount: evt.type === 'buy' ? -amount : amount
+          amount: isBuy ? -amount : amount
         });
 
-        if (evt.type === 'buy') {
-          lotsMap[sym].push({ qty: evt.quantity, costOrig: costPS, costTWD: costTW });
-        } else { // sell
+        if (isBuy) {
+          lotsMap[sym].lots.push({
+            qty: evt.quantity,
+            currency: cur,
+            costOrig: costPS,
+            costTwd:  costTW
+          });
+          lotsMap[sym].qty      += evt.quantity;
+          lotsMap[sym].costOrig += costPS * evt.quantity;
+          lotsMap[sym].costTwd  += costTW * evt.quantity;
+        } else {
           let remain = evt.quantity;
-          while (remain > 0 && lotsMap[sym].length) {
-            const lot = lotsMap[sym][0];
-            if (lot.qty <= remain) { remain -= lot.qty; lotsMap[sym].shift(); }
-            else { lot.qty -= remain; remain = 0; }
+          while (remain > 0 && lotsMap[sym].lots.length) {
+            const lot  = lotsMap[sym].lots[0];
+            const take = Math.min(lot.qty, remain);
+
+            lot.qty          -= take;
+            lotsMap[sym].qty -= take;
+
+            const origVal = lot.costOrig * take;
+            const twdVal  = lot.costTwd  * take;
+            lotsMap[sym].costOrig -= origVal;
+            lotsMap[sym].costTwd  -= twdVal;
+
+            if (lot.qty < 1e-9) lotsMap[sym].lots.shift();
+            remain -= take;
           }
-          if (remain > 0) throw new Error(`Sell > position for ${sym}`);
+          if (remain > 0) {
+            oversellMap.set(sym, { missing: remain, txId: evt.id });
+            log(`[Oversell] ${sym} qty ${remain}`);
+          }
         }
         break;
       }
 
       /* ── 拆股 ── */
       case 'split': {
-        if (!lotsMap[sym]) break;
-        lotsMap[sym].forEach(l => {
+        const lm = lotsMap[sym];
+        if (!lm) break;
+
+        lm.lots.forEach(l => {
           l.qty      *= evt.ratio;
           l.costOrig /= evt.ratio;
-          l.costTWD  /= evt.ratio;
+          l.costTwd  /= evt.ratio;
         });
+
+        lm.qty *= evt.ratio;
+        // lm.costOrig & lm.costTwd 保持不變（總成本不應受影響）
         break;
       }
 
       /* ── 股息 ── */
       case 'dividend': {
-        const lots = lotsMap[sym] || [];
-        const qty  = lots.reduce((s,l)=>s+l.qty,0);
-        if (!qty) break;
+        const lm = lotsMap[sym];
+        if (!lm || lm.qty < 1e-9) break;
 
-        const isUSD = (curMap[sym] || 'USD') === 'USD';
+        const isUSD = (lm.lots[0]?.currency || 'USD') === 'USD';
         const fx    = isUSD ? rateFn(evt.date) : 1;
-        const amt   = qty * evt.amount * fx;
+        const amt   = lm.qty * evt.amount * fx;
         if (amt) cashflows.push({ date: new Date(evt.date), amount: amt });
         break;
       }
@@ -381,27 +481,26 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
   const holdings = {};
   let   mktValue = 0;
 
-  Object.entries(lotsMap).forEach(([sym,lots]) => {
-    const qty = lots.reduce((s,l)=>s+l.qty,0);
-    if (qty < 1e-9) return;
+  Object.entries(lotsMap).forEach(([sym, lm]) => {
+    if (lm.qty < 1e-9) return;
 
-    const costTWD = lots.reduce((s,l)=>s+l.costTWD*l.qty,0);
-    const costOrg = lots.reduce((s,l)=>s+l.costOrig*l.qty,0);
-    const pxOrg   = marketData[sym]?.priceSearch(today) || 0;
-    const fx      = (curMap[sym]==='USD') ? fxLatest : 1;
-    const mvTWD   = qty * pxOrg * fx;
-    mktValue     += mvTWD;
+    const pxOrg  = marketData[sym]?.priceSearch(today) || 0;
+    const cur    = lm.lots[0]?.currency || 'USD';
+    const fx     = cur === 'USD' ? fxLatest : 1;
+    const mvTwd  = lm.qty * pxOrg * fx;
+
+    mktValue += mvTwd;
 
     holdings[sym] = {
       symbol: sym,
-      quantity: qty,
-      currency: curMap[sym],
-      avgCostOriginal: costOrg/qty,
-      totalCostTWD: costTWD,
+      quantity: lm.qty,
+      currency: cur,
+      avgCostOriginal: lm.costOrig / lm.qty,
+      totalCostTWD:    lm.costTwd,
       currentPriceOriginal: pxOrg,
-      marketValueTWD: mvTWD,
-      unrealizedPLTWD: mvTWD - costTWD,
-      returnRate: costTWD ? (mvTWD-costTWD)/costTWD*100 : 0
+      marketValueTWD:  mvTwd,
+      unrealizedPLTWD: mvTwd - lm.costTwd,
+      returnRate:      lm.costTwd ? (mvTwd - lm.costTwd) / lm.costTwd * 100 : 0
     };
   });
 
@@ -409,17 +508,15 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
   if (mktValue) cashflows.push({ date: today, amount: mktValue });
   const xirr = calculateXIRR(cashflows);
 
-  /* 5. 實現損益 (不再扣市值) */
-  const pos = cashflows.filter(c=>c.amount>0 && c.date!==today)
+  /* 5. 實現損益 */
+  const pos = cashflows.filter(c => c.amount > 0 && c.date !== today)
                        .reduce((s,c)=>s+c.amount,0);
-  const neg = cashflows.filter(c=>c.amount<0)
+  const neg = cashflows.filter(c => c.amount < 0)
                        .reduce((s,c)=>s+Math.abs(c.amount),0);
   const totalRealizedPL = pos - neg;
 
   /* 6. 歷史淨值 */
-  const portfolioHistory = calculatePortfolioHistory(
-    events, marketData, curMap
-  );
+  const portfolioHistory = calculatePortfolioHistory(events, marketData, lotsMap);
 
   log(`Holdings: ${Object.keys(holdings).length}  XIRR=${xirr}`);
 
@@ -428,53 +525,66 @@ function calculatePortfolio(transactions, userSplits, marketData, log) {
 
 /* ─────────────── Portfolio History (daily) ─────────────────── */
 
-function calculatePortfolioHistory(events, marketData, curMap) {
-  const txEvents = events.filter(e=>e.eventType==='transaction');
+function calculatePortfolioHistory(events, marketData, initLotsMap) {
+  const txEvents = events.filter(e => e.eventType === 'transaction');
   if (!txEvents.length) return {};
 
-  const first = new Date(txEvents[0].date);
-  first.setUTCHours(0,0,0,0);
+  const firstDay = new Date(txEvents[0].date);
+  firstDay.setUTCHours(0,0,0,0);
   const today = new Date(); today.setUTCHours(0,0,0,0);
 
   const history = {};
-  const lotsMap = {};
+
+  // 深拷貝 lotsMap 用於重播
+  const lotsMap = JSON.parse(JSON.stringify(initLotsMap));
   const rateFn  = marketData['TWD=X']?.rateSearch || (()=>1);
 
-  /* 先依序處理至第一天前，建立初始 lotsMap 空 */
-  let idx=0;
-  for (let d = new Date(first); d <= today; d.setDate(d.getDate()+1)) {
+  // 重新跑事件索引
+  let idx = 0;
+  for (let d = new Date(firstDay); d <= today; d.setDate(d.getDate()+1)) {
 
-    /* 把 <= d 的事件都吃掉 */
+    // 處理 <= 當日事件
     while (idx < events.length && events[idx].date <= d) {
-      const e = events[idx]; const sym = e.symbol?.toUpperCase();
+      const e   = events[idx];
+      const sym = e.symbol?.toUpperCase();
+
       switch (e.eventType) {
         case 'transaction':
-          if (!lotsMap[sym]) lotsMap[sym]=[];
-          if (e.type==='buy') lotsMap[sym].push({qty:e.quantity});
-          else {
-            let rem=e.quantity;
-            while(rem&&lotsMap[sym].length){
-              const lot=lotsMap[sym][0];
-              if(lot.qty<=rem){rem-=lot.qty;lotsMap[sym].shift();}
-              else{lot.qty-=rem;rem=0;}
+          if (!lotsMap[sym])
+            lotsMap[sym] = { lots: [], qty: 0 };
+
+          const isBuy = e.type === 'buy';
+          if (isBuy) {
+            lotsMap[sym].lots.push({ qty: e.quantity, costDummy:1 }); // 僅需數量
+            lotsMap[sym].qty += e.quantity;
+          } else {
+            let rem = e.quantity;
+            while (rem && lotsMap[sym].lots.length) {
+              const lot  = lotsMap[sym].lots[0];
+              const take = Math.min(lot.qty, rem);
+              lot.qty   -= take;
+              lotsMap[sym].qty -= take;
+              if (lot.qty < 1e-9) lotsMap[sym].lots.shift();
+              rem -= take;
             }
           }
           break;
+
         case 'split':
-          lotsMap[sym]?.forEach(lot=>{ lot.qty*=e.ratio; });
+          lotsMap[sym]?.lots.forEach(l => { l.qty *= e.ratio; });
+          lotsMap[sym].qty *= e.ratio;
           break;
       }
       idx++;
     }
 
-    /* 計算當日市值 */
-    let total=0;
-    Object.entries(lotsMap).forEach(([sym,lots])=>{
-      const qty=lots.reduce((s,l)=>s+l.qty,0);
-      if(!qty) return;
-      const pxOrg=marketData[sym]?.priceSearch(d)||0;
-      const fx=(curMap[sym]==='USD')?rateFn(d):1;
-      total += qty*pxOrg*fx;
+    // 市值
+    let total = 0;
+    Object.entries(lotsMap).forEach(([sym, lm]) => {
+      if (lm.qty < 1e-9) return;
+      const pxOrg = marketData[sym]?.priceSearch(d) || 0;
+      const fx    = rateFn(d);     // 僅 USD→TWD
+      total += lm.qty * pxOrg * fx;
     });
     history[d.toISOString().slice(0,10)] = total;
   }
@@ -484,35 +594,38 @@ function calculatePortfolioHistory(events, marketData, curMap) {
 /* ────────────────────────  XIRR  ───────────────────────────── */
 
 function calculateXIRR(cashflows) {
-  if (cashflows.length<2) return null;
+  if (cashflows.length < 2) return null;
 
-  const vals  = cashflows.map(c=>c.amount);
-  const dates = cashflows.map(c=>c.date);
+  const vals  = cashflows.map(c => c.amount);
+  const dates = cashflows.map(c => c.date);
   const t0    = dates[0].getTime();
-  const yrs   = dates.map(d=>(d.getTime()-t0)/3.15576e10);
+  const yrs   = dates.map(d => (d.getTime() - t0) / 3.15576e10);
 
-  const npv  = r => vals.reduce((s,v,i)=>s+v/Math.pow(1+r,yrs[i]),0);
-  const dnpv = r => vals.reduce((s,v,i)=>s-yrs[i]*v/Math.pow(1+r,yrs[i]+1),0);
+  const npv  = r => vals.reduce((s,v,i)=>s + v / Math.pow(1 + r, yrs[i]), 0);
+  const dnpv = r => vals.reduce((s,v,i)=>s - yrs[i] * v / Math.pow(1 + r, yrs[i] + 1), 0);
 
-  /* Newton 迭代 */
-  let guess=0.1, tol=1e-6;
-  for(let i=0;i<50;i++){
-    const f=npv(guess), df=dnpv(guess);
-    if(Math.abs(df)<1e-10) break;
-    const g1=guess - f/df;
-    if(Math.abs(g1-guess)<tol) return g1;
-    if(g1<=-0.999) break;
-    guess=g1;
+  /* 先掃描找符號反轉區間 */
+  let a=-0.9, b=1, fa=npv(a), fb=npv(b);
+  if (fa*fb > 0) return null;                     // 無解
+
+  /* Newton */
+  let guess = 0.1, tol = 1e-6;
+  for (let i=0;i<50;i++) {
+    const f  = npv(guess), df = dnpv(guess);
+    if (Math.abs(df) < 1e-10) break;
+    const g1 = guess - f / df;
+    if (g1 <= -0.999) break;
+    if (Math.abs(g1 - guess) < tol) return g1;
+    guess = g1;
   }
 
-  /* Brent 簡化 */
-  let a=-0.999,b=10,fa=npv(a),fb=npv(b);
-  if(fa*fb>0) return null;
-  for(let i=0;i<100;i++){
-    const c=(a*fb - b*fa)/(fb-fa);
-    const fc=npv(c);
-    if(Math.abs(fc)<tol) return c;
-    if(fa*fc<0){b=c;fb=fc;} else {a=c;fa=fc;}
+  /* Brent (簡版) */
+  for (let i=0;i<100;i++) {
+    const c  = (a*fb - b*fa) / (fb - fa);
+    const fc = npv(c);
+    if (Math.abs(fc) < tol) return c;
+    if (fa*fc < 0) { b = c; fb = fc; }
+    else           { a = c; fa = fc; }
   }
   return null;
 }
