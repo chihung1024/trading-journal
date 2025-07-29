@@ -180,14 +180,16 @@
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
     /* ---------- 依自己的 Firebase 專案填入 ---------- */
-    const firebaseConfig = {
-      apiKey: "YOUR_API_KEY",
-      authDomain: "YOUR_AUTH_DOMAIN",
-      projectId: "YOUR_PROJECT_ID",
-      storageBucket: "YOUR_STORAGE_BUCKET",
-      messagingSenderId: "YOUR_MSG_ID",
-      appId: "YOUR_APP_ID"
-    };
+// firebaseConfig 只要放在一個地方，全站共用
+const firebaseConfig = {
+  apiKey:            "AIzaSyA1B2C3D4E5F6G7H8I9J0K",
+  authDomain:        "trading-journal-4922c.firebaseapp.com",
+  projectId:         "trading-journal-4922c",
+  storageBucket:     "trading-journal-4922c.appspot.com",
+  messagingSenderId: "50863752247",
+  appId:             "1:50863752247:web:766eaa892d2c8d28bb6bb2",
+  measurementId:     "G-ABCDEFGH"          // 如果 SDK 片段裡有就一起貼
+};
     /* ------------------------------------------------------------------ */
 
     /* ======== 全域狀態 ======== */
