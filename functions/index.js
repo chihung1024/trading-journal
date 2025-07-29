@@ -402,6 +402,10 @@ function createCashflows(evts,pf,holdings,market){
     flows.push({date:today, amount:-mktVal});   // 負向殘值
     flows.push({date:today, amount: mktVal});   // 假設同日變現
   }
+  
+  // --- 關鍵：依日期早→晚排序 ---
+  flows.sort((a, b) => new Date(a.date) - new Date(b.date));
+
   return flows;
 }
 
@@ -419,7 +423,7 @@ function calculateXIRR(flows){
     if(Math.abs(ng-g)<1e-6)return ng;
     g=ng;
   }
-  return g;
+  return Number.isFinite(g) ? g : null;
 }
 
 function dailyValue(state,market,date){
