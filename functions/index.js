@@ -6,6 +6,19 @@ const yahooFinance = require("yahoo-finance2").default;
 admin.initializeApp();
 const db = admin.firestore();
 
+/* ---------- utils ---------- */
+/**
+ * 取得該筆交易的「總成本」：
+ * - 若交易文件本身有 totalCost 欄位，就用它（代表使用者可能已把手續費、稅算進去）
+ * - 若沒有，就退而求其次用 price * quantity
+ */
+function getTotalCost(tx){
+  return (tx.totalCost !== undefined && tx.totalCost !== null)
+         ? Number(tx.totalCost)
+         : Number(tx.price || 0) * Number(tx.quantity || 0);
+}
+
+
 /* ================================================================
  *  幣別對照表 ── 需要其他幣別時只要再往下加
  * ================================================================ */
@@ -234,7 +247,7 @@ function calculatePortfolio(txs,splits,market,log){
         const t=e;
         pf[sym].currency=t.currency;
         const fx=findFxRate(market,t.currency,t.date);
-        const cost = t.totalCost;                    // 已含稅手續費
+        const cost = getTotalCost(t);                    // 已含稅手續費
         const costTWD = cost * (t.currency==="TWD"?1:fx);
 
         if(t.type==="buy"){
@@ -369,7 +382,7 @@ function createCashflows(evts,pf,holdings,market){
   /* ---------- 交易現金流（含手續費稅） ---------- */
   evts.filter(e=>e.eventType==="transaction").forEach(t=>{
     const fx = findFxRate(market,t.currency,t.date);
-    const amt = t.totalCost * (t.currency==="TWD"?1:fx);   // totalCost 已含稅費
+    const amt = getTotalCost(t) * (t.currency==="TWD"?1:fx);
     flows.push({date:toDate(t.date),amount: t.type==="buy"? -amt : amt});
   });
 
