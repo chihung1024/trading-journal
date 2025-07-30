@@ -4,11 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>股票交易紀錄與資產分析系統 (最終修正版)</title>
-    <!-- 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 引入 ApexCharts 圖表庫 -->
     <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
-    <!-- 引入 Lucide Icons 圖示庫 -->
     <script src="https://cdn.jsdelivr.net/npm/lucide@0.378.0/dist/umd/lucide.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -26,10 +23,8 @@
 <body class="text-gray-800">
 
     <div id="app" class="min-h-screen">
-        <!-- Notification Area -->
         <div id="notification-area" class="fixed top-5 right-5 z-50"></div>
 
-        <!-- Header -->
         <header class="bg-white shadow-md sticky top-0 z-20">
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
                 <div class="flex items-center space-x-3">
@@ -64,9 +59,7 @@
                 </form>
             </div>
         </div>
-        <!-- Main Content -->
         <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-            <!-- Loading Spinner -->
             <div id="loading-overlay" class="fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-40">
                 <div class="flex flex-col items-center text-center p-4">
                     <svg id="loading-spinner-icon" class="animate-spin h-10 w-10 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
@@ -74,7 +67,6 @@
                 </div>
             </div>
 
-            <!-- Dashboard Stats -->
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
                 <div class="card p-5 flex flex-col justify-between"><div class="flex items-center justify-between"><h3 class="text-sm font-medium text-gray-500">總資產 (TWD)</h3><i data-lucide="wallet" class="h-6 w-6 text-gray-400"></i></div><p id="total-assets" class="text-3xl font-bold text-gray-800 mt-2">0</p></div>
                 <div class="card p-5 flex flex-col justify-between"><div class="flex items-center justify-between"><h3 class="text-sm font-medium text-gray-500">未實現損益 (TWD)</h3><i data-lucide="trending-up" class="h-6 w-6 text-gray-400"></i></div><p id="unrealized-pl" class="text-3xl font-bold text-gray-800 mt-2">0</p></div>
@@ -83,7 +75,6 @@
                 <div class="card p-5 flex flex-col justify-between"><div class="flex items-center justify-between"><h3 class="text-sm font-medium text-gray-500">XIRR 年化報酬率</h3><i data-lucide="calendar-check" class="h-6 w-6 text-gray-400"></i></div><p id="xirr-value" class="text-3xl font-bold text-gray-800 mt-2">0.00%</p></div>
             </div>
 
-            <!-- Holdings and Transactions -->
             <div class="card p-6 mb-8">
                 <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
                     <div class="sm:flex sm:items-center sm:space-x-4"><h2 class="text-xl font-bold text-gray-800">投資組合</h2><div class="mt-2 sm:mt-0 border-b sm:border-b-0 sm:border-l border-gray-200 sm:pl-4"><nav class="-mb-px flex space-x-6" id="tabs"><a href="#" data-tab="holdings" class="tab-item whitespace-nowrap border-b-2 font-medium text-sm border-indigo-500 text-indigo-600">持股一覽</a><a href="#" data-tab="transactions" class="tab-item whitespace-nowrap border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">交易紀錄</a><a href="#" data-tab="splits" class="tab-item whitespace-nowrap border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">拆股事件</a></nav></div></div>
@@ -97,11 +88,9 @@
                 <div id="splits-tab" class="tab-content overflow-x-auto hidden"><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">日期</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">代碼</th><th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">比例</th><th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th></tr></thead><tbody id="splits-table-body" class="bg-white divide-y divide-gray-200"></tbody></table></div>
             </div>
 
-            <!-- Asset Growth Chart -->
             <div class="card p-6"><h3 class="text-lg font-semibold text-gray-800 mb-4">資產成長曲線 (TWD)</h3><div id="asset-chart"></div></div>
         </main>
 
-        <!-- Modals -->
         <div id="transaction-modal" class="fixed inset-0 z-30 overflow-y-auto hidden"><div class="flex items-center justify-center min-h-screen"><div class="fixed inset-0 modal-backdrop" id="modal-backdrop-trans"></div><div class="bg-white rounded-lg shadow-xl p-8 z-40 w-full max-w-md mx-4"><h3 id="modal-title" class="text-2xl font-bold mb-6 text-gray-800">新增交易紀錄</h3><form id="transaction-form"><input type="hidden" id="transaction-id"><div class="mb-4"><label for="transaction-date" class="block text-sm font-medium text-gray-700 mb-1">日期</label><input type="date" id="transaction-date" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label for="stock-symbol" class="block text-sm font-medium text-gray-700 mb-1">股票代碼</label><input type="text" id="stock-symbol" placeholder="例如: AAPL, 2330.TW" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div class="mb-4"><label class="block text-sm font-medium text-gray-700 mb-1">交易類型</label><div class="flex space-x-4"><label class="flex items-center"><input type="radio" name="transaction-type" value="buy" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500" checked><span class="ml-2 text-gray-700">買入</span></label><label class="flex items-center"><input type="radio" name="transaction-type" value="sell" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="ml-2 text-gray-700">賣出</span></label></div></div><div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4"><div><label for="quantity" class="block text-sm font-medium text-gray-700 mb-1">股數</label><input type="number" step="any" id="quantity" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div><div><label for="price" class="block text-sm font-medium text-gray-700 mb-1">價格 (原幣)</label><input type="number" step="any" id="price" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" required></div></div><div class="mb-4"><label for="currency" class="block text-sm font-medium text-gray-700 mb-1">幣別</label><select id="currency" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"><option value="USD">USD</option><option value="TWD">TWD</option></select></div>
                 <div id="exchange-rate-field" class="space-y-4 mb-4 p-4 border border-gray-200 rounded-md optional-field">
                     <label for="exchange-rate" class="block text-sm font-medium text-gray-700 mb-1">手動匯率 (選填)</label>
@@ -119,7 +108,6 @@
     <script type="module">
     // --- Firebase SDK ---
     import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    // [修改] 引入更多驗證相關的函式
     import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
     import { getFirestore, collection, doc, addDoc, onSnapshot, updateDoc, deleteDoc, query, orderBy, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
@@ -140,12 +128,14 @@
     let db, auth;
     let transactions = [];
     let userSplits = [];
-    let holdings = {};
     let chart;
     let userId;
-    let realizedPLFromBackend = 0;
-    let overallReturnRateFromBackend = 0;
-    let xirrFromBackend = 0;
+    
+    // 不再需要這麼多分散的全域狀態變數
+    // let holdings = {};
+    // let realizedPLFromBackend = 0;
+    // let overallReturnRateFromBackend = 0;
+    // let xirrFromBackend = 0;
     
     let transactionsUnsubscribe = null;
     let splitsUnsubscribe = null;
@@ -175,14 +165,13 @@
             setupEventListeners();
             initializeChart();
             lucide.createIcons();
-            handleAuthentication(); // 處理驗證流程
+            handleAuthentication();
         } catch (error) {
             console.error("Firebase 初始化失敗:", error);
             showLoadingError("Firebase 初始化失敗！", "請檢查 firebaseConfig 是否正確。");
         }
     }
 
-    // [修改] 全面修改驗證處理邏輯
     function handleAuthentication() {
         onAuthStateChanged(auth, (user) => {
             const loadingOverlay = document.getElementById('loading-overlay');
@@ -192,72 +181,58 @@
             const logoutBtn = document.getElementById('logout-btn');
 
             if (user) {
-                // --- 使用者已登入 ---
                 userId = user.uid;
-                
-                // 更新UI
                 document.getElementById('auth-status').textContent = '已連線';
                 document.getElementById('user-id').textContent = `使用者: ${user.email}`;
-                loadingOverlay.style.display = 'flex'; // 顯示讀取畫面
+                loadingOverlay.style.display = 'flex';
                 authContainer.classList.add('hidden');
                 mainContent.classList.remove('hidden');
                 userInfo.classList.remove('hidden');
                 logoutBtn.classList.remove('hidden');
-                
-                // 設定資料監聽
                 setupDataListeners();
             } else {
-                // --- 使用者已登出或未登入 ---
                 userId = null;
-                
-                // 清理舊的監聽器
                 if (transactionsUnsubscribe) transactionsUnsubscribe();
                 if (splitsUnsubscribe) splitsUnsubscribe();
                 if (historyUnsubscribe) historyUnsubscribe();
                 if (holdingsUnsubscribe) holdingsUnsubscribe();
-
-                // 更新UI
                 loadingOverlay.style.display = 'none';
                 authContainer.classList.remove('hidden');
                 mainContent.classList.add('hidden');
                 userInfo.classList.add('hidden');
                 logoutBtn.classList.add('hidden');
+                // 登出後清理畫面
+                renderHoldingsTable({});
+                renderTransactionsTable();
+                renderSplitsTable();
+                updateDashboard({}, 0, 0, 0);
+                updateAssetChart({});
             }
         });
     }
 
-    // [修改] 加入新的 UI 事件監聽器
     function setupEventListeners() {
-        // 原有監聽器
         document.getElementById('add-transaction-btn').addEventListener('click', () => openModal());
         document.getElementById('cancel-btn').addEventListener('click', closeModal);
         document.getElementById('modal-backdrop-trans').addEventListener('click', closeModal);
         document.getElementById('transaction-form').addEventListener('submit', handleFormSubmit);
-        
         document.getElementById('manage-splits-btn').addEventListener('click', openSplitModal);
         document.getElementById('cancel-split-btn').addEventListener('click', closeSplitModal);
         document.getElementById('modal-backdrop-split').addEventListener('click', closeSplitModal);
         document.getElementById('split-form').addEventListener('submit', handleSplitFormSubmit);
-
         document.getElementById('tabs').addEventListener('click', (e) => { e.preventDefault(); if (e.target.matches('.tab-item')) { switchTab(e.target.dataset.tab); } });
         document.getElementById('confirm-cancel-btn').addEventListener('click', hideConfirm);
         document.getElementById('confirm-ok-btn').addEventListener('click', () => { if (confirmCallback) { confirmCallback(); } hideConfirm(); });
         document.getElementById('currency').addEventListener('change', toggleOptionalFields);
-
-        // [新增] 驗證相關的事件監聽
         document.getElementById('login-btn').addEventListener('click', handleLogin);
         document.getElementById('register-btn').addEventListener('click', handleRegister);
         document.getElementById('logout-btn').addEventListener('click', handleLogout);
     }
     
-    // [新增] 處理註冊的函式
     async function handleRegister() {
         const email = document.getElementById('email').value;
         const password = document.getElementById('password').value;
-        if (!email || !password) {
-            showNotification('error', '請輸入電子郵件和密碼。');
-            return;
-        }
+        if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; }
         try {
             await createUserWithEmailAndPassword(auth, email, password);
             showNotification('success', '註冊成功！已自動登入。');
@@ -267,14 +242,10 @@
         }
     }
 
-    // [新增] 處理登入的函式
     async function handleLogin() {
         const email = document.getElementById('email').value;
         const password = document.getElementById('password').value;
-        if (!email || !password) {
-            showNotification('error', '請輸入電子郵件和密碼。');
-            return;
-        }
+        if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; }
         try {
             await signInWithEmailAndPassword(auth, email, password);
             showNotification('success', '登入成功！');
@@ -284,16 +255,11 @@
         }
     }
 
-    // [新增] 處理登出的函式
     async function handleLogout() {
         try {
             await signOut(auth);
-            // 清理畫面資料
             transactions = [];
             userSplits = [];
-            holdings = {};
-            renderAll();
-            chart.updateSeries([{ data: [] }]);
             showNotification('info', '您已成功登出。');
         } catch (error) {
             console.error("登出失敗:", error);
@@ -313,83 +279,60 @@
 
     // --- 資料處理 (Firestore) ---
     function setupDataListeners() {
-        if (!userId) return; // 如果沒有 userId，則不執行
+        if (!userId) return;
 
         if (transactionsUnsubscribe) transactionsUnsubscribe();
         if (splitsUnsubscribe) splitsUnsubscribe();
         if (historyUnsubscribe) historyUnsubscribe();
         if (holdingsUnsubscribe) holdingsUnsubscribe();
         
-        // 重設資料狀態
         dataLoaded = { transactions: false, holdings: false, splits: false };
         transactions = [];
         userSplits = [];
-        holdings = {};
 
-
+        // [最終修正] 分離監聽器責任，消除渲染競爭
+        // 監聽器 1: 只負責交易列表
         const transactionsCol = collection(db, 'users', userId, 'transactions');
         const tq = query(transactionsCol, orderBy("date", "asc"));
-        
         transactionsUnsubscribe = onSnapshot(tq, (snapshot) => {
             transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             dataLoaded.transactions = true;
-            // [關鍵修正] 不再呼叫 renderAll()，只呼叫自己的渲染函式
-            updateExchangeRateCache().then(() => renderTransactionsTable());
+            updateExchangeRateCache().then(() => renderTransactionsTable()); // 只渲染自己
+            checkInitialLoad();
         }, (error) => console.error("讀取交易紀錄失敗:", error));
 
+        // 監聽器 2: 只負責拆股事件列表
         const splitsCol = collection(db, 'users', userId, 'splits');
         const sq = query(splitsCol, orderBy("date", "asc"));
-        
         splitsUnsubscribe = onSnapshot(sq, (snapshot) => {
             userSplits = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             dataLoaded.splits = true;
-            // [關鍵修正] 不再呼叫 renderAll()，只呼叫自己的渲染函式
-            renderSplitsTable();
+            renderSplitsTable(); // 只渲染自己
+            checkInitialLoad();
         }, (error) => console.error("讀取拆股事件失敗:", error));
         
-        // index.html - 確認 onSnapshot 監聽器的內容
+        // 監聽器 3: 核心監聽器，負責儀表板、持股和歷史圖表
         const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
         holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
             let currentHoldings = {};
             let currentRealizedPL = 0;
             let currentOverallReturn = 0;
             let currentXIRR = 0;
-        
+
             if (docSnap.exists()) {
                 const data = docSnap.data();
-                // 直接將新資料賦值給局部變數
                 currentHoldings = data.holdings || {};
                 currentRealizedPL = data.totalRealizedPL || 0;
                 currentOverallReturn = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
                 currentXIRR = data.xirr || 0;
-        
-                // 同時更新全域變數，供其他地方使用 (例如 renderAll 首次載入時)
-                holdings = currentHoldings;
-                realizedPLFromBackend = currentRealizedPL;
-                overallReturnRateFromBackend = currentOverallReturn;
-                xirrFromBackend = currentXIRR;
-        
-            } else {
-                // 如果文件不存在，也更新全域變數
-                holdings = {};
-                realizedPLFromBackend = 0;
-                overallReturnRateFromBackend = 0;
-                xirrFromBackend = 0;
             }
+            
             dataLoaded.holdings = true;
-        
-            // [關鍵修正] 不再呼叫 renderAll()，而是精準地呼叫需要更新的函式
-            // 並將最新的資料作為參數傳遞 (這也是上次的建議，但這次是在正確的時機呼叫)
+            
+            // 使用最新的資料來渲染相關區塊
             renderHoldingsTable(currentHoldings);
             updateDashboard(currentHoldings, currentRealizedPL, currentOverallReturn, currentXIRR);
-        
-            // 首次載入時，檢查是否所有資料都已到位，並隱藏讀取動畫
-            const loadingOverlay = document.getElementById('loading-overlay');
-            if (loadingOverlay.style.display !== 'none' && dataLoaded.transactions && dataLoaded.splits) {
-                 loadingOverlay.style.display = 'none';
-                 showNotification('success', '雲端資料同步完成！');
-            }
-        
+            checkInitialLoad();
         }, (error) => console.error("讀取持股資料失敗:", error));
 
         const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
@@ -397,30 +340,22 @@
             if (docSnap.exists()) {
                 updateAssetChart(docSnap.data().history);
             } else {
-                 updateAssetChart({}); // 清空圖表
+                 updateAssetChart({});
             }
         }, (error) => console.error("讀取資產歷史失敗:", error));
     }
-
-        // 將函式簽名從 async function renderAll() 改為：
-    async function renderAll() {
-        if (!dataLoaded.transactions || !dataLoaded.holdings || !dataLoaded.splits) return;
     
-        renderHoldingsTable(holdings); // 傳入全域變數
-        renderTransactionsTable();
-        renderSplitsTable();
-        updateDashboard(holdings, realizedPLFromBackend, overallReturnRateFromBackend, xirrFromBackend);
-    
+    // 輔助函式，用於首次載入時隱藏讀取動畫
+    function checkInitialLoad() {
         const loadingOverlay = document.getElementById('loading-overlay');
-        if (loadingOverlay.style.display !== 'none') {
-            loadingOverlay.style.display = 'none';
-            showNotification('success', '雲端資料同步完成！');
+        if (loadingOverlay.style.display !== 'none' && dataLoaded.transactions && dataLoaded.splits && dataLoaded.holdings) {
+             loadingOverlay.style.display = 'none';
+             showNotification('success', '雲端資料同步完成！');
         }
     }
     
     // --- 核心渲染 ---
-    // (此處 renderHoldingsTable, renderTransactionsTable, renderSplitsTable, updateDashboard, initializeChart, updateAssetChart 等函式無需修改)
-    // ... 將您原本的這些函式複製到這裡 ...
+    // [最終修正] 渲染函式接收參數，不再依賴全域變數
     function renderHoldingsTable(currentHoldings) {
         const tableBody = document.getElementById('holdings-table-body');
         tableBody.innerHTML = '';
@@ -449,7 +384,7 @@
         });
     }
 
-    async function renderTransactionsTable() {
+    function renderTransactionsTable() {
         const tableBody = document.getElementById('transactions-table-body');
         tableBody.innerHTML = '';
         if (transactions.length === 0) {
@@ -460,13 +395,11 @@
         for (const t of [...transactions].reverse()) {
             const row = document.createElement('tr');
             row.className = "hover:bg-gray-50";
-            const typeText = { buy: '買入', sell: '賣出', dividend: '股息' };
-            const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' };
-            
+            const typeText = { buy: '買入', sell: '賣出' };
+            const typeColor = { buy: 'text-red-500', sell: 'text-green-500' };
             const totalAmountOriginal = t.totalCost || (t.quantity * t.price);
             const transactionDate = t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date;
             const decimals = isTwStock(t.symbol) ? 0 : 2;
-
             let rateForDisplay = 'N/A';
             let totalAmountTWD_HTML = '計算中...';
 
@@ -504,7 +437,6 @@
             tableBody.innerHTML = `<tr><td colspan="4" class="text-center py-10 text-gray-500">沒有自定義拆股事件。</td></tr>`;
             return;
         }
-
         for (const s of [...userSplits].reverse()) {
             const row = document.createElement('tr');
             row.className = "hover:bg-gray-50";
@@ -519,30 +451,27 @@
         document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit));
     }
 
-        // 將函式簽名從 function updateDashboard() 改為：
     function updateDashboard(currentHoldings, currentRealizedPL, currentOverallReturn, currentXIRR) {
-        const holdingsArray = Object.values(currentHoldings); // <--- 使用參數
+        const holdingsArray = Object.values(currentHoldings);
         const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
         const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
-    
-        const totalReturnOnInvestment = currentOverallReturn; // 使用參數 currentOverallReturn
-    
+        
         document.getElementById('total-assets').textContent = formatNumber(totalMarketValue, 0);
-    
+        
         const unrealizedEl = document.getElementById('unrealized-pl');
         unrealizedEl.textContent = formatNumber(totalUnrealizedPL, 0);
         unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
-    
+        
         const realizedEl = document.getElementById('realized-pl');
-        realizedEl.textContent = formatNumber(currentRealizedPL, 0); // 使用參數 currentRealizedPL
+        realizedEl.textContent = formatNumber(currentRealizedPL, 0);
         realizedEl.className = `text-3xl font-bold mt-2 ${currentRealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
-    
+
         const totalReturnEl = document.getElementById('total-return');
-        totalReturnEl.textContent = `${totalReturnOnInvestment.toFixed(2)}%`;
-        totalReturnEl.className = `text-3xl font-bold mt-2 ${totalReturnOnInvestment >= 0 ? 'text-red-600' : 'text-green-600'}`;
-    
+        totalReturnEl.textContent = `${(currentOverallReturn || 0).toFixed(2)}%`;
+        totalReturnEl.className = `text-3xl font-bold mt-2 ${currentOverallReturn >= 0 ? 'text-red-600' : 'text-green-600'}`;
+        
         const xirrEl = document.getElementById('xirr-value');
-        xirrEl.textContent = `${(currentXIRR * 100).toFixed(2)}%`; // 使用參數 currentXIRR
+        xirrEl.textContent = `${((currentXIRR || 0) * 100).toFixed(2)}%`;
         xirrEl.className = `text-3xl font-bold mt-2 ${currentXIRR >= 0 ? 'text-red-600' : 'text-green-600'}`;
     }
 
@@ -564,12 +493,9 @@
     }
     
     // --- 匯率快取 & 表單處理 ---
-    // (此處 updateExchangeRateCache, findNearestAvailableRate, handleFormSubmit, handleSplitFormSubmit, handleDelete, handleDeleteSplit, handleEdit, openModal, closeModal 等函式無需修改)
-    // ... 將您原本的這些函式複製到這裡 ...
     async function updateExchangeRateCache() {
         const uniqueDates = [...new Set(transactions.map(t => t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date))];
         const rateDocRef = doc(db, 'exchange_rates', 'TWD=X');
-        
         try {
             const docSnap = await getDoc(rateDocRef);
             if (docSnap.exists()) {
@@ -580,49 +506,30 @@
                     }
                 }
             }
-        } catch (e) {
-            console.error(`從 Firestore 讀取匯率失敗:`, e);
-        }
+        } catch (e) { console.error(`從 Firestore 讀取匯率失敗:`, e); }
     }
 
     function findNearestAvailableRate(history, targetDateStr) {
         if (!history || !targetDateStr || Object.keys(history).length === 0) return null;
-        
         const targetDate = new Date(targetDateStr);
-
         if (history[targetDateStr]) return history[targetDateStr];
-
         for (let i = 1; i <= 7; i++) {
             const d = new Date(targetDate);
-            d.setDate(d.getDate() + i);
+            d.setDate(d.getDate() - i);
             const d_str = d.toISOString().split('T')[0];
-            if (history[d_str]) {
-                return history[d_str];
-            }
+            if (history[d_str]) return history[d_str];
         }
-
         const sortedDates = Object.keys(history).sort();
         let closestDate = null;
         for (const dateStr of sortedDates) {
-            if (dateStr <= targetDateStr) {
-                closestDate = dateStr;
-            } else {
-                break;
-            }
+            if (dateStr <= targetDateStr) { closestDate = dateStr; } else { break; }
         }
-        if (closestDate) {
-            return history[closestDate];
-        }
-
-        return null;
+        return closestDate ? history[closestDate] : null;
     }
     
     async function handleFormSubmit(e) {
         e.preventDefault();
-        if (!userId) {
-             showNotification('error', '請先登入！');
-             return;
-        }
+        if (!userId) { showNotification('error', '請先登入！'); return; }
         const id = document.getElementById('transaction-id').value;
         const transactionData = { 
             date: new Date(document.getElementById('transaction-date').value),
@@ -632,23 +539,16 @@
             price: parseFloat(document.getElementById('price').value), 
             currency: document.getElementById('currency').value 
         };
-
         const exchangeRate = parseFloat(document.getElementById('exchange-rate').value);
         const totalCost = parseFloat(document.getElementById('total-cost').value);
-
-        if (transactionData.currency === 'USD') {
-            if (!isNaN(exchangeRate) && exchangeRate > 0) {
-                transactionData.exchangeRate = exchangeRate;
-            }
+        if (transactionData.currency === 'USD' && !isNaN(exchangeRate) && exchangeRate > 0) {
+            transactionData.exchangeRate = exchangeRate;
         }
         if (!isNaN(totalCost) && totalCost > 0) {
             transactionData.totalCost = totalCost;
         }
-
         if (!transactionData.symbol || isNaN(transactionData.quantity) || isNaN(transactionData.price)) { showNotification('error', '請填寫所有必填欄位。'); return; }
-
         const txCol = collection(db, 'users', userId, 'transactions');
-
         try {
             if (id) {
                 await updateDoc(doc(txCol, id), transactionData);
@@ -658,7 +558,6 @@
             closeModal();
             showNotification('success', id ? '交易已更新！' : '交易已新增！');
             showNotification('info', `後端正在為您即時更新資產數據...`);
-
         } catch (error) {
             console.error("儲存交易失敗:", error);
             showNotification('error', "儲存失敗，請稍後再試。");
@@ -667,21 +566,16 @@
 
     async function handleSplitFormSubmit(e) {
         e.preventDefault();
-        if (!userId) {
-             showNotification('error', '請先登入！');
-             return;
-        }
+        if (!userId) { showNotification('error', '請先登入！'); return; }
         const splitData = {
             date: new Date(document.getElementById('split-date').value),
             symbol: document.getElementById('split-symbol').value.toUpperCase().trim(),
             ratio: parseFloat(document.getElementById('split-ratio').value)
         };
-
         if (!splitData.symbol || isNaN(splitData.ratio) || splitData.ratio <= 0) {
             showNotification('error', '請填寫所有欄位並確保比例大於0。');
             return;
         }
-
         const splitsCol = collection(db, 'users', userId, 'splits');
         try {
             await addDoc(splitsCol, splitData);
@@ -735,7 +629,6 @@
         const form = document.getElementById('transaction-form'); 
         form.reset(); 
         document.getElementById('transaction-id').value = '';
-        
         if (isEdit && transaction) {
             document.getElementById('modal-title').textContent = '編輯交易紀錄'; 
             document.getElementById('transaction-id').value = transaction.id; 
@@ -766,14 +659,11 @@
     function hideConfirm() { confirmCallback = null; document.getElementById('confirm-modal').classList.add('hidden'); }
 
     // --- 輔助函式 ---
-    // (此處 isTwStock, formatNumber, showNotification, showConfirm, showLoadingError, switchTab 等函式無需修改)
-    // ... 將您原本的這些函式複製到這裡 ...
     function isTwStock(symbol) {
         if (!symbol) return false;
         const upperSymbol = symbol.toUpperCase();
         return upperSymbol.endsWith('.TW') || upperSymbol.endsWith('.TWO');
     }
-
     function formatNumber(value, decimals = 2) { const num = Number(value); if (isNaN(num)) return '0.00'; return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }); }
     function showNotification(type, message) { 
         const area = document.getElementById('notification-area'); 
