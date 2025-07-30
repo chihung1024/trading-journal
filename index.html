@@ -364,23 +364,27 @@
             renderAll();
         }, (error) => console.error("讀取持股資料失敗:", error));
 
-        const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
-        
+       
         // 在 setupDataListeners 函式中找到並替換這段
         const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
         historyUnsubscribe = onSnapshot(historyDocRef, (docSnap) => {
-            // [修改] 以下是新的處理邏輯
+        
+            console.log("--- 偵錯日誌：步驟 A ---");
+        
             if (docSnap.exists()) {
                 const historyData = docSnap.data().history;
-                // 分別更新兩張圖表
+                console.log("從 Firestore 收到的 historyData:", historyData); // 印出從後台收到的原始資料
+        
                 updateAssetChart(historyData);
                 updateTwrChart(historyData);
             } else {
-                // 如果沒有歷史紀錄，清空兩張圖表
+                console.log("history 文件不存在。");
                 updateAssetChart({});
                 updateTwrChart({});
             }
-        }, (error) => console.error("讀取資產歷史失敗:", error));
+        }, (error) => {
+            console.error("讀取資產歷史失敗:", error);
+        });
     }
 
     async function renderAll() {
@@ -557,43 +561,56 @@
         twrChart.render();
     }
 
-    // [修改] 增加防呆機制，使其能兼容新舊兩種資料格式
     function updateAssetChart(portfolioHistory) {
+        console.log("--- 偵錯日誌：步驟 B ---");
+        console.log("updateAssetChart 接收到的資料:", portfolioHistory); // 印出傳入此函式的資料
+    
         if (!chart || !portfolioHistory || Object.keys(portfolioHistory).length === 0) {
+            console.log("資產圖表：資料為空，清空圖表。");
             if(chart) chart.updateSeries([{ data: [] }]);
             return;
         }
     
-        const chartData = Object.entries(portfolioHistory)
-            .sort((a, b) => new Date(a[0]) - new Date(b[0]))
-            .map(([date, value]) => {
-                // [防呆修正] 檢查 value 的類型。如果是物件，則讀取 marketValue；否則直接使用 value。
-                const marketVal = (typeof value === 'object' && value !== null && value.marketValue !== undefined) 
-                    ? value.marketValue 
-                    : (typeof value === 'number' ? value : 0);
-                return [new Date(date).getTime(), marketVal];
-            });
-        chart.updateSeries([{ data: chartData }]);
+        try {
+            const chartData = Object.entries(portfolioHistory)
+                .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+                .map(([date, value]) => {
+                    const marketVal = (typeof value === 'object' && value !== null && value.marketValue !== undefined) 
+                        ? value.marketValue 
+                        : (typeof value === 'number' ? value : 0);
+                    return [new Date(date).getTime(), marketVal];
+                });
+            console.log("準備渲染到資產圖表的最終數據:", chartData);
+            chart.updateSeries([{ data: chartData }]);
+        } catch (e) {
+            console.error("updateAssetChart 內部發生錯誤:", e);
+        }
     }
 
-    // [修改] 增加防呆機制，確保只在有 twr 數據時才計算
     function updateTwrChart(portfolioHistory) {
+        console.log("--- 偵錯日誌：步驟 C ---");
+        console.log("updateTwrChart 接收到的資料:", portfolioHistory); // 印出傳入此函式的資料
+    
         if (!twrChart || !portfolioHistory || Object.keys(portfolioHistory).length === 0) {
+            console.log("TWR圖表：資料為空，清空圖表。");
             if(twrChart) twrChart.updateSeries([{ data: [] }]);
             return;
         }
     
-        const chartData = Object.entries(portfolioHistory)
-            .sort((a, b) => new Date(a[0]) - new Date(b[0]))
-            .map(([date, value]) => {
-                // [防呆修正] 檢查 value 是否為物件，以及 twr 是否存在
-                const twrIndex = (typeof value === 'object' && value !== null && value.twr !== undefined) 
-                    ? value.twr 
-                    : 1; // 如果沒有TWR數據，預設為1 (即0%報酬)
-                return [new Date(date).getTime(), (twrIndex - 1) * 100];
-            });
-    
-        twrChart.updateSeries([{ data: chartData }]);
+        try {
+            const chartData = Object.entries(portfolioHistory)
+                .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+                .map(([date, value]) => {
+                    const twrIndex = (typeof value === 'object' && value !== null && value.twr !== undefined) 
+                        ? value.twr 
+                        : 1; 
+                    return [new Date(date).getTime(), (twrIndex - 1) * 100];
+                });
+            console.log("準備渲染到TWR圖表的最終數據:", chartData);
+            twrChart.updateSeries([{ data: chartData }]);
+        } catch (e) {
+            console.error("updateTwrChart 內部發生錯誤:", e);
+        }
     }
     
     // --- 匯率快取 & 表單處理 ---
