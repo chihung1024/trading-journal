@@ -393,12 +393,11 @@ function createCashflows(evts, pf, holdings, market, firstBuyDateMap) {
     if (amt > 0) flows.push({ date: new Date(d.date), amount: amt });
   });
 
-  // 3. 殘值
+  // 3. 期末清算價值（只推一筆正現金流！）
   const mktVal = Object.values(holdings).reduce((s, h) => s + h.marketValueTWD, 0);
   if (mktVal > 0) {
     const today = new Date();
-    flows.push({ date: today, amount: -mktVal });
-    flows.push({ date: today, amount: mktVal });
+    flows.push({ date: today, amount: mktVal }); // 只留下正數
   }
 
   // 4. 合併同日現金流
@@ -419,6 +418,7 @@ function createCashflows(evts, pf, holdings, market, firstBuyDateMap) {
   })));
   return mergedFlows;
 }
+
 
 function calculateXIRR(flows) {
   if (!Array.isArray(flows) || flows.length < 2) return null;
