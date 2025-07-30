@@ -557,29 +557,41 @@
         twrChart.render();
     }
 
-    // [修改] 更新 updateAssetChart 來讀取新的資料結構
+    // [修改] 增加防呆機制，使其能兼容新舊兩種資料格式
     function updateAssetChart(portfolioHistory) {
         if (!chart || !portfolioHistory || Object.keys(portfolioHistory).length === 0) {
             if(chart) chart.updateSeries([{ data: [] }]);
             return;
         }
-        // 從物件中提取 marketValue
+    
         const chartData = Object.entries(portfolioHistory)
             .sort((a, b) => new Date(a[0]) - new Date(b[0]))
-            .map(([date, value]) => [new Date(date).getTime(), value.marketValue]); // 修改點
+            .map(([date, value]) => {
+                // [防呆修正] 檢查 value 的類型。如果是物件，則讀取 marketValue；否則直接使用 value。
+                const marketVal = (typeof value === 'object' && value !== null && value.marketValue !== undefined) 
+                    ? value.marketValue 
+                    : (typeof value === 'number' ? value : 0);
+                return [new Date(date).getTime(), marketVal];
+            });
         chart.updateSeries([{ data: chartData }]);
     }
 
-    // [新增] 更新 TWR 圖表的函式
+    // [修改] 增加防呆機制，確保只在有 twr 數據時才計算
     function updateTwrChart(portfolioHistory) {
         if (!twrChart || !portfolioHistory || Object.keys(portfolioHistory).length === 0) {
             if(twrChart) twrChart.updateSeries([{ data: [] }]);
             return;
         }
-        // 將 TWR 指數轉換為百分比 (TWR Index - 1) * 100
+    
         const chartData = Object.entries(portfolioHistory)
             .sort((a, b) => new Date(a[0]) - new Date(b[0]))
-            .map(([date, value]) => [new Date(date).getTime(), ((value.twr || 1) - 1) * 100]);
+            .map(([date, value]) => {
+                // [防呆修正] 檢查 value 是否為物件，以及 twr 是否存在
+                const twrIndex = (typeof value === 'object' && value !== null && value.twr !== undefined) 
+                    ? value.twr 
+                    : 1; // 如果沒有TWR數據，預設為1 (即0%報酬)
+                return [new Date(date).getTime(), (twrIndex - 1) * 100];
+            });
     
         twrChart.updateSeries([{ data: chartData }]);
     }
