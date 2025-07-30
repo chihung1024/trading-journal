@@ -1,137 +1,23 @@
-/* eslint-disable */
-const functions = require("firebase-functions");
-const admin = require("firebase-admin");
-const yahooFinance = require("yahoo-finance2").default;
-
-admin.initializeApp();
-const db = admin.firestore();
-
-/* ---------- utils ---------- */
-function getTotalCost(tx) {
-  return (tx.totalCost !== undefined && tx.totalCost !== null)
-    ? Number(tx.totalCost)
-    : Number(tx.price || 0) * Number(tx.quantity || 0);
-}
-
-/* 幣別對照表 */
-const currencyToFx = {
-  USD: "TWD=X",
-  HKD: "HKD=TWD",
-  JPY: "JPY=TWD"
-  // TWD 省略
-};
-
-/* ================================================================
- * 核心： Portfolio Recalculation
- * ================================================================ */
-async function performRecalculation(uid) {
-  const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
-  const logs = [];
-  const log = msg => {
-    const ts = new Date().toISOString();
-    logs.push(`${ts}: ${msg}`);
-    console.log(`[${uid}] ${ts}: ${msg}`);
-  };
-
-  try {
-    log("--- Recalc start (現金流&防呆加強版) ---");
-
-    const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-    const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
-
-    const [txSnap, splitSnap] = await Promise.all([
-      db.collection(`users/${uid}/transactions`).get(),
-      db.collection(`users/${uid}/splits`).get()
-    ]);
-    const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-    if (txs.length === 0) {
-      await Promise.all([
-        holdingsRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-        histRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-      ]);
-      log("no tx, cleared");
-      return;
-    }
-
-    const market = await getMarketDataFromDb(txs, log);
-    const result = calculatePortfolio(txs, splits, market, log);
-    const {
-      holdings,
-      totalRealizedPL,
-      portfolioHistory,
-      xirr,
-      overallReturnRateTotal,
-      overallReturnRate
-    } = result;
-
-    const data = {
-      holdings,
-      totalRealizedPL,
-      xirr,
-      overallReturnRateTotal,
-      overallReturnRate,
-      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-      force_recalc_timestamp: admin.firestore.FieldValue.delete()
-    };
-
-    // [關鍵日誌] 在寫入前，將完整的資料物件印出來檢查
-    console.log(`Data to be written for user ${uid}:`, JSON.stringify(data, null, 2));
-
-    // [您的優化] 分開寫入，精準定位錯誤
-    log(`Preparing to write current_holdings for user ${uid}...`);
-    await holdingsRef.set(data, { merge: true });
-    log(`Write to current_holdings for user ${uid} complete.`);
-
-    log(`Preparing to write portfolio_history for user ${uid}...`);
-    await histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
-    log(`Write to portfolio_history for user ${uid} complete.`);
-    
-    log("--- Recalc done ---");
-  } catch (e) {
-    // 如果上方任何一個 await 失敗，都會被這裡捕捉到
-    console.error(`[${uid}] An error occurred during calculation or write:`, e);
-    logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
-  } finally {
-    // 無論成功或失敗，最後都會嘗試將日誌寫入資料庫
-    await logRef.set({ entries: logs });
-  }
-}
-
-
-/* ================================================================
- * Triggers
- * ================================================================ */
 exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
   .onWrite((chg, ctx) => {
     const beforeData = chg.before.data();
     const afterData = chg.after.data();
 
-    // 情況一：文件被刪除，直接結束
+    // [最終修正] 這是最重要的防護。如果文件被刪除，afterData會不存在。
+    // 這條規則會立即停止函式，防止因刪除而觸發不必要的計算。
     if (beforeData && !afterData) {
-      console.log(`[${ctx.params.uid}] Document deleted. No action.`);
+      console.log(`[${ctx.params.uid}] current_holdings document was deleted. Halting execution.`);
       return null;
     }
 
-    // 情況二：文件被建立，且帶有觸發器時間戳
-    if (!beforeData && afterData) {
-      if (afterData.force_recalc_timestamp) {
-        console.log(`[${ctx.params.uid}] Document created. Triggering recalculation.`);
-        return performRecalculation(ctx.params.uid);
-      }
-    }
-
-    // 情況三：文件被更新，且觸發器時間戳發生變化
-    if (beforeData && afterData) {
-      if (afterData.force_recalc_timestamp !== beforeData.force_recalc_timestamp) {
-        console.log(`[${ctx.params.uid}] Timestamp updated. Triggering recalculation.`);
-        return performRecalculation(ctx.params.uid);
-      }
+    // 只有在文件是新建的，或是時間戳有變動時，才執行重度計算
+    if (!beforeData || (afterData.force_recalc_timestamp !== beforeData.force_recalc_timestamp)) {
+      console.log(`[${ctx.params.uid}] Trigger condition met. Starting recalculation.`);
+      return performRecalculation(ctx.params.uid);
     }
     
-    // 其他所有情況 (例如：更新了其他欄位但時間戳不變)，不執行任何操作
+    // 其他所有情況 (例如：函式自己寫入結果時的觸發)，不執行任何操作
     console.log(`[${ctx.params.uid}] Write event did not meet trigger conditions. No action.`);
     return null;
   });
