@@ -174,18 +174,48 @@ exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memo
     return null;
   });
 
+// [修正] 更新匯率時，只為有交易紀錄的使用者觸發重算
 exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
   .firestore.document("exchange_rates/{fxSym}")
   .onWrite(async (chg, ctx) => {
+    // 檢查匯率是否有實際變動，若無則不執行
     const b = chg.before.exists ? chg.before.data() : null;
     const a = chg.after.data();
     if (b && JSON.stringify(b.rates) === JSON.stringify(a.rates)) return null;
-    const users = await db.collection("users").listDocuments();
+
+    console.log(`FX rate for ${ctx.params.fxSym} updated. Finding active users to trigger recalculation.`);
+
+    // [關鍵修正] 不再列出所有 user 文件，而是透過 collectionGroup 查詢有交易紀錄的使用者
+    const txSnap = await db.collectionGroup("transactions").get();
+    if (txSnap.empty) {
+      console.log("No transactions found in any user account. Halting execution.");
+      return null;
+    }
+
+    // 從交易紀錄中提取不重複的使用者 ID
+    const users = new Set(
+      txSnap.docs.map(d => d.ref.path.split("/")[1])
+        .filter(uid => typeof uid === "string" && uid.length > 0)
+    );
+
+    if (users.size === 0) {
+        console.log("Found transactions but could not derive user IDs. Halting execution.");
+        return null;
+    }
+
+    console.log(`Found ${users.size} active user(s) to update: ${[...users].join(', ')}`);
+
     const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all(users.map(u =>
-      db.doc(`users/${u.id}/user_data/current_holdings`)
-        .set({ force_recalc_timestamp: ts }, { merge: true })
-    ));
+    // 只為活躍使用者觸發重算
+    await Promise.all([...users].map(async uid => {
+      try {
+        await db.doc(`users/${uid}/user_data/current_holdings`)
+          .set({ force_recalc_timestamp: ts }, { merge: true });
+      } catch (e) {
+        console.error(`Error updating current_holdings for user ${uid}:`, e);
+      }
+    }));
+
     return null;
   });
 
