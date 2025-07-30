@@ -1,21 +1,58 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // 使用者資料: 允許使用者讀寫自己的資料
-    match /users/{userId}/{collection}/{docId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    // ----------------------------------------------------------------------
+    // 函式庫：定義可重複使用的條件，讓規則更簡潔易讀
+    // ----------------------------------------------------------------------
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+    function isAuthenticated() {
+      return request.auth != null;
     }
 
-    // 市場資料: 允許任何已登入的使用者讀取
+    // ----------------------------------------------------------------------
+    // 使用者資料：提供更精確的子集合權限控制
+    // ----------------------------------------------------------------------
+    match /users/{userId} {
+      // 使用者只能讀取自己的文件夾，不能直接寫入 user document
+      allow read: if isOwner(userId);
+      allow write: if false;
+
+      // 交易紀錄 (transactions): 使用者可以對自己的交易進行所有操作
+      match /transactions/{txId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+      
+      // 拆股紀錄 (splits): 使用者可以對自己的拆股事件進行所有操作
+      match /splits/{splitId} {
+        allow read, create, update, delete: if isOwner(userId);
+      }
+
+      // 使用者綜合資料 (user_data): 這是後端計算的結果
+      // 使用者只能讀取，絕不允許從客戶端寫入，以確保資料完整性
+      match /user_data/{docId} {
+        allow read: if isOwner(userId);
+        allow write: if false; // 禁止客戶端寫入
+      }
+    }
+
+    // ----------------------------------------------------------------------
+    // 公開市場資料：任何已登入使用者可讀，禁止所有客戶端寫入
+    // ----------------------------------------------------------------------
+
+    // [修正] 針對 price_history 集合的規則
     match /price_history/{symbol} {
-      allow read: if request.auth != null;
-      allow write: if false; // 只能由後端服務寫入
+      allow read: if isAuthenticated();
+      allow write: if false; // 只能由後端 Admin SDK 寫入
     }
-
+    
+    // [修正] 針對 exchange_rates 集合的規則
     match /exchange_rates/{pair} {
-      allow read: if request.auth != null;
-      allow write: if false; // 只能由後端服務寫入
+      allow read: if isAuthenticated();
+      allow write: if false; // 只能由後端 Admin SDK 寫入
     }
   }
 }
