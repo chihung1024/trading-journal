@@ -24,7 +24,6 @@ const currencyToFx = {
 /* ================================================================
  * 核心： Portfolio Recalculation
  * ================================================================ */
-// 還原成正常的 performRecalculation 函式
 async function performRecalculation(uid) {
   const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
   const logs = [];
@@ -47,26 +46,24 @@ async function performRecalculation(uid) {
     const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    // [修正] 當沒有交易時，執行此區塊
     if (txs.length === 0) {
       await Promise.all([
-        // [修正] 使用 .set 搭配 { merge: true } 並明確刪除觸發欄位，以避免二次觸發
+        // [最終修正] 移除 { merge: true }，改為完全覆寫
         holdingsRef.set({
           holdings: {},
           totalRealizedPL: 0,
-          xirr: null, // 同步清除其他計算欄位
+          xirr: null,
           overallReturnRateTotal: 0,
           overallReturnRate: 0,
           lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-          force_recalc_timestamp: admin.firestore.FieldValue.delete() // <--- 關鍵修正
-        }, { merge: true }), // <--- 關鍵修正
+          force_recalc_timestamp: admin.firestore.FieldValue.delete()
+        }),
         histRef.set({
           history: {},
           lastUpdated: admin.firestore.FieldValue.serverTimestamp()
         })
       ]);
       log("no tx, cleared");
-      // 注意：這裡的 return 會結束函式，下方的程式碼不會執行
       return;
     }
 
@@ -91,7 +88,8 @@ async function performRecalculation(uid) {
       force_recalc_timestamp: admin.firestore.FieldValue.delete()
     };
     
-    await holdingsRef.set(data, { merge: true });
+    // [最終修正] 移除 { merge: true }，改為完全覆寫，確保舊的持股資料被清除
+    await holdingsRef.set(data);
     await histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
     
     log("--- Recalc done ---");
@@ -112,20 +110,16 @@ exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: 
     const beforeData = chg.before.data();
     const afterData = chg.after.data();
 
-    // [最終修正] 這是最重要的防護。如果文件被刪除，afterData會不存在。
-    // 這條規則會立即停止函式，防止因刪除而觸發不必要的計算。
     if (beforeData && !afterData) {
       console.log(`[${ctx.params.uid}] current_holdings document was deleted. Halting execution.`);
       return null;
     }
 
-    // 只有在文件是新建的，或是時間戳有變動時，才執行重度計算
     if (!beforeData || (afterData.force_recalc_timestamp !== beforeData.force_recalc_timestamp)) {
       console.log(`[${ctx.params.uid}] Trigger condition met. Starting recalculation.`);
       return performRecalculation(ctx.params.uid);
     }
     
-    // 其他所有情況 (例如：函式自己寫入結果時的觸發)，不執行任何操作
     console.log(`[${ctx.params.uid}] Write event did not meet trigger conditions. No action.`);
     return null;
   });
@@ -174,25 +168,22 @@ exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memo
     return null;
   });
 
-// [修正] 更新匯率時，只為有交易紀錄的使用者觸發重算
+// [修正] 更新匯率時，只為有交易紀錄的使用者觸發重算，避免復活問題
 exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
   .firestore.document("exchange_rates/{fxSym}")
   .onWrite(async (chg, ctx) => {
-    // 檢查匯率是否有實際變動，若無則不執行
     const b = chg.before.exists ? chg.before.data() : null;
     const a = chg.after.data();
     if (b && JSON.stringify(b.rates) === JSON.stringify(a.rates)) return null;
 
     console.log(`FX rate for ${ctx.params.fxSym} updated. Finding active users to trigger recalculation.`);
 
-    // [關鍵修正] 不再列出所有 user 文件，而是透過 collectionGroup 查詢有交易紀錄的使用者
     const txSnap = await db.collectionGroup("transactions").get();
     if (txSnap.empty) {
       console.log("No transactions found in any user account. Halting execution.");
       return null;
     }
 
-    // 從交易紀錄中提取不重複的使用者 ID
     const users = new Set(
       txSnap.docs.map(d => d.ref.path.split("/")[1])
         .filter(uid => typeof uid === "string" && uid.length > 0)
@@ -206,7 +197,6 @@ exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory:
     console.log(`Found ${users.size} active user(s) to update: ${[...users].join(', ')}`);
 
     const ts = admin.firestore.FieldValue.serverTimestamp();
-    // 只為活躍使用者觸發重算
     await Promise.all([...users].map(async uid => {
       try {
         await db.doc(`users/${uid}/user_data/current_holdings`)
@@ -215,7 +205,6 @@ exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory:
         console.error(`Error updating current_holdings for user ${uid}:`, e);
       }
     }));
-
     return null;
   });
 
@@ -275,7 +264,6 @@ async function fetchAndSaveMarketData(symbol, log) {
  * Portfolio calculation
  * ================================================================ */
 function calculatePortfolio(txs, splits, market, log) {
-  // 計算每支股票首次持有日
   const firstBuyDateMap = {};
   txs.forEach(tx => {
     if (tx.type === "buy") {
@@ -285,22 +273,18 @@ function calculatePortfolio(txs, splits, market, log) {
     }
   });
 
-  // --- 組事件佇列 ---
   const evts = [
     ...txs.map(t => ({ ...t, date: toDate(t.date), eventType: "transaction" })),
     ...splits.map(s => ({ ...s, date: toDate(s.date), eventType: "split" }))
   ];
-  // 加進配息，但要過濾早於首次持有日的現金流
   [...new Set(txs.map(t => t.symbol.toUpperCase()))].forEach(sym => {
     Object.entries(market[sym]?.dividends || {}).forEach(([d, amt]) => {
       if (firstBuyDateMap[sym] && new Date(d) >= firstBuyDateMap[sym])
         evts.push({ date: new Date(d), symbol: sym, amount: amt, eventType: "dividend" });
-      // 早於首次持有日會被排除
     });
   });
   evts.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  // --- 模擬 FIFO ---
   const pf = {};
   let totalRealizedPL = 0;
   for (const e of evts) {
@@ -384,7 +368,6 @@ function calculatePortfolio(txs, splits, market, log) {
 /* ================================================================
  * Helpers
  * ================================================================ */
-// [最終修正] 修正後的 calculateFinalHoldings 函式
 function calculateFinalHoldings(pf, market) {
   const out = {}, today = new Date();
   for (const sym in pf) {
@@ -408,7 +391,6 @@ function calculateFinalHoldings(pf, market) {
       avgCostOriginal: totCostOrg / qty,
       totalCostTWD: totCostTWD,
       investedCostTWD: invested,
-      // 這是關鍵修正：確保 currentPriceOriginal 永遠不會是 undefined
       currentPriceOriginal: curPrice ?? null,
       marketValueTWD: mktVal,
       unrealizedPLTWD: unreal,
@@ -438,17 +420,14 @@ function calculatePortfolioHistory(evts, market) {
 
 function createCashflows(evts, pf, holdings, market, firstBuyDateMap) {
   const flows = [];
-  // 1. 交易
   evts.filter(e => e.eventType === "transaction").forEach(t => {
     const fx = findFxRate(market, t.currency, t.date);
     const amt = getTotalCost(t) * (t.currency === "TWD" ? 1 : fx);
     flows.push({ date: toDate(t.date), amount: t.type === "buy" ? -amt : amt });
   });
 
-  // 2. 股利
   evts.filter(e => e.eventType === "dividend").forEach(d => {
     const sym = d.symbol.toUpperCase();
-    // 僅保留在持有日以後的配息
     if (!firstBuyDateMap[sym] || new Date(d.date) < firstBuyDateMap[sym]) return;
     const fx = findFxRate(market, pf[sym]?.currency || "USD", d.date);
     const shares = pf[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
@@ -457,14 +436,12 @@ function createCashflows(evts, pf, holdings, market, firstBuyDateMap) {
     if (amt > 0) flows.push({ date: new Date(d.date), amount: amt });
   });
 
-  // 3. 期末清算價值（只推一筆正現金流！）
   const mktVal = Object.values(holdings).reduce((s, h) => s + h.marketValueTWD, 0);
   if (mktVal > 0) {
     const today = new Date();
-    flows.push({ date: today, amount: mktVal }); // 只留下正數
+    flows.push({ date: today, amount: mktVal });
   }
 
-  // 4. 合併同日現金流
   const combineByDate = {};
   for (const f of flows) {
     const k = (f.date instanceof Date ? f.date.toISOString().slice(0, 10) : String(f.date).slice(0, 10));
@@ -475,14 +452,12 @@ function createCashflows(evts, pf, holdings, market, firstBuyDateMap) {
     .map(([date, amt]) => ({ date: new Date(date), amount: amt }))
     .sort((a, b) => a.date - b.date);
 
-  // Debug log
   console.table(mergedFlows.map(f => ({
     date: f.date.toISOString().slice(0, 10),
     amt: f.amount
   })));
   return mergedFlows;
 }
-
 
 function calculateXIRR(flows) {
   if (!Array.isArray(flows) || flows.length < 2) return null;
@@ -493,25 +468,23 @@ function calculateXIRR(flows) {
   const npv = r => amounts.reduce((s, v, i) => s + v / Math.pow(1 + r, years[i]), 0);
   const dnpv = r => amounts.reduce((s, v, i) => s - v * years[i] / Math.pow(1 + r, years[i] + 1), 0);
 
-  // 用多初始值增加穩定性
   for(let base = 0; base <= 4; base++) {
-    let r = 0.1 + base * 0.2;       // 多組起點，0.1, 0.3, 0.5, ...
-    for(let i = 0; i < 300; i++) {   // 迭代數加多
+    let r = 0.1 + base * 0.2;
+    for(let i = 0; i < 300; i++) {
       const f = npv(r);
       const f1 = dnpv(r);
       if (Math.abs(f1) < 1e-10) {
         r += 0.1;
-        continue;                    // 碰到平坦區就換新猜值
+        continue;
       }
       const nr = r - f / f1;
       if (!isFinite(nr)) break;
-      if (Math.abs(nr - r) < 1e-6) return nr;  // 收斂即回值
+      if (Math.abs(nr - r) < 1e-6) return nr;
       r = nr;
     }
   }
   return null;
 }
-
 
 function dailyValue(state, market, date) {
   let tot = 0;
