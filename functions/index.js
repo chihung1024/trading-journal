@@ -314,6 +314,7 @@ function calculatePortfolio(txs, splits, market, log) {
 /* ================================================================
  * Helpers
  * ================================================================ */
+// [最終修正] 修正後的 calculateFinalHoldings 函式
 function calculateFinalHoldings(pf, market) {
   const out = {}, today = new Date();
   for (const sym in pf) {
@@ -337,7 +338,8 @@ function calculateFinalHoldings(pf, market) {
       avgCostOriginal: totCostOrg / qty,
       totalCostTWD: totCostTWD,
       investedCostTWD: invested,
-      currentPriceOriginal: curPrice,
+      // 這是關鍵修正：確保 currentPriceOriginal 永遠不會是 undefined
+      currentPriceOriginal: curPrice ?? null,
       marketValueTWD: mktVal,
       unrealizedPLTWD: unreal,
       realizedPLTWD: h.realizedPLTWD || 0,
