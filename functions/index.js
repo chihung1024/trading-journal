@@ -76,18 +76,25 @@ async function performRecalculation(uid) {
       force_recalc_timestamp: admin.firestore.FieldValue.delete()
     };
 
-    log(`[${uid}] 準備寫入 current_holdings...`);
-    await holdingsRef.set(data, { merge: true });
-    log(`[${uid}] current_holdings 寫入完成`);
+    // [關鍵日誌] 在寫入前，將完整的資料物件印出來檢查
+    console.log(`Data to be written for user ${uid}:`, JSON.stringify(data, null, 2));
 
-    log(`[${uid}] 準備寫入 portfolio_history...`);
+    // [您的優化] 分開寫入，精準定位錯誤
+    log(`Preparing to write current_holdings for user ${uid}...`);
+    await holdingsRef.set(data, { merge: true });
+    log(`Write to current_holdings for user ${uid} complete.`);
+
+    log(`Preparing to write portfolio_history for user ${uid}...`);
     await histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
-    log(`[${uid}] portfolio_history 寫入完成`);
+    log(`Write to portfolio_history for user ${uid} complete.`);
+    
     log("--- Recalc done ---");
   } catch (e) {
-    console.error(`[${uid}] 發生錯誤:`, e);
+    // 如果上方任何一個 await 失敗，都會被這裡捕捉到
+    console.error(`[${uid}] An error occurred during calculation or write:`, e);
     logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
   } finally {
+    // 無論成功或失敗，最後都會嘗試將日誌寫入資料庫
     await logRef.set({ entries: logs });
   }
 }
