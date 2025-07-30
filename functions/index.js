@@ -49,7 +49,9 @@ async function performRecalculation(uid) {
   logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
 } finally {
   await logRef.set({ entries: logs });
-    
+}
+
+
     const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
     const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
     const [txSnap, splitSnap] = await Promise.all([
