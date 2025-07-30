@@ -24,6 +24,9 @@ const currencyToFx = {
 /* ================================================================
  * 核心： Portfolio Recalculation
  * ================================================================ */
+// ==================================================================
+// === 偵錯專用版 performRecalculation，用來測試最單純的寫入 ===
+// ==================================================================
 async function performRecalculation(uid) {
   const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
   const logs = [];
@@ -32,55 +35,29 @@ async function performRecalculation(uid) {
     logs.push(`${ts}: ${msg}`);
     console.log(`[${uid}] ${ts}: ${msg}`);
   };
+
   try {
-    log("--- Recalc start (現金流&防呆加強版) ---");
-
+    log("--- [DEBUG] Running simplified test write ---");
     const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-    const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
-    const [txSnap, splitSnap] = await Promise.all([
-      db.collection(`users/${uid}/transactions`).get(),
-      db.collection(`users/${uid}/splits`).get()
-    ]);
-    const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-    const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    if (txs.length === 0) {
-      await Promise.all([
-        holdingsRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-        histRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-      ]);
-      log("no tx, cleared");
-      return;
-    }
-
-    const market = await getMarketDataFromDb(txs, log);
-    const result = calculatePortfolio(txs, splits, market, log);
-    const {
-      holdings,
-      totalRealizedPL,
-      portfolioHistory,
-      xirr,
-      overallReturnRateTotal,
-      overallReturnRate
-    } = result;
-
-    const data = {
-      holdings,
-      totalRealizedPL,
-      xirr,
-      overallReturnRateTotal,
-      overallReturnRate,
-      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-      force_recalc_timestamp: admin.firestore.FieldValue.delete()
+    // 建立一個絕對合法的、最簡單的測試資料物件
+    const testData = {
+      debug_status: "SUCCESS",
+      message: "This is a simple test write.",
+      test_timestamp: new Date() // 使用標準 Date 物件
     };
-    await Promise.all([
-      holdingsRef.set(data, { merge: true }),
-      histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-    ]);
-    log("--- Recalc done ---");
+
+    console.log(`[DEBUG] Attempting to write simple test data to path: ${holdingsRef.path}`);
+    console.log("[DEBUG] Test data content:", testData);
+
+    // 執行最單純的 set 操作
+    await holdingsRef.set(testData);
+
+    log("[SUCCESS] Simplified test write appears to have completed!");
+
   } catch (e) {
-    console.error(`[${uid}]`, e);
-    logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
+    console.error(`[CRITICAL] The simple test write FAILED:`, e);
+    logs.push(`CRITICAL (simple test): ${e.message}\n${e.stack}`);
   } finally {
     await logRef.set({ entries: logs });
   }
