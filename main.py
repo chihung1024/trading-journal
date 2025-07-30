@@ -89,12 +89,24 @@ def get_all_user_ids(db):
 if __name__ == "__main__":
     db_client = initialize_firebase()
     print("Starting market data update script (User-Defined Split Model)...")
-    symbols = get_all_symbols_from_transactions(db_client)
-    if symbols:
-        fetch_and_update_market_data(db_client, symbols)
-        user_ids = get_all_user_ids(db_client)
-        if user_ids:
-            trigger_recalculation_for_users(db_client, user_ids)
+    
+    # 1. 取得所有交易紀錄中的股票代碼
+    symbols_from_transactions = get_all_symbols_from_transactions(db_client)
+    
+    # 2. [新增] 取得所有使用者設定的 benchmark 代碼 (包含預設的 SPY)
+    symbols_from_benchmarks = get_all_benchmarks_from_preferences(db_client)
+
+    # 3. [修改] 將兩者合併，確保所有需要的資料都被更新
+    all_symbols_to_update = list(set(symbols_from_transactions + symbols_from_benchmarks))
+    
+    if all_symbols_to_update:
+        print(f"Total symbols to update: {len(all_symbols_to_update)}")
+        fetch_and_update_market_data(db_client, all_symbols_to_update)
+        # 觸發重新計算的部分可以保持不變或暫時移除，因為價格更新會自動觸發
+        # user_ids = get_all_user_ids(db_client)
+        # if user_ids:
+        #     trigger_recalculation_for_users(db_client, user_ids)
     else:
-        print("No transactions found.")
+        print("No transactions or benchmarks found to update.")
+        
     print("Market data update script finished.")
