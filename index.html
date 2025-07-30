@@ -143,6 +143,7 @@
     let realizedPLFromBackend = 0, overallReturnRateFromBackend = 0, xirrFromBackend = 0;
     let unsubscribers = [];
     let dataLoaded = { transactions: false, holdings: false, splits: false };
+    let confirmCallback = null;
     
     // --- 主程式入口 ---
     document.addEventListener('DOMContentLoaded', () => {
@@ -316,16 +317,161 @@
     async function handleRegister(auth) { const email = document.getElementById('email').value; const password = document.getElementById('password').value; if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; } try { await createUserWithEmailAndPassword(auth, email, password); showNotification('success', '註冊成功！已自動登入。'); } catch (error) { console.error("註冊失敗:", error); showNotification('error', `註冊失敗: ${error.message}`); } }
     async function handleLogin(auth) { const email = document.getElementById('email').value; const password = document.getElementById('password').value; if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; } try { await signInWithEmailAndPassword(auth, email, password); showNotification('success', '登入成功！'); } catch (error) { console.error("登入失敗:", error); showNotification('error', `登入失敗: ${error.message}`); } }
     async function handleLogout(auth) { try { await signOut(auth); showNotification('info', '您已成功登出。'); } catch (error) { console.error("登出失敗:", error); showNotification('error', `登出失敗: ${error.message}`); } }
-    function renderHoldingsTable() { const tableBody = document.getElementById('holdings-table-body'); tableBody.innerHTML = ''; const holdingsArray = Object.values(holdings); if (holdingsArray.length === 0) { tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有持股紀錄。</td></tr>`; return; } holdingsArray.sort((a,b) => b.marketValueTWD - a.marketValueTWD).forEach(h => { const row = document.createElement('tr'); row.className = "hover:bg-gray-50"; const decimals = isTwStock(h.symbol) ? 0 : 2; row.innerHTML = `<td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${h.symbol}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.quantity, decimals)}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.avgCostOriginal, 2)} <span class="text-xs text-gray-500">${h.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.totalCostTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.currentPriceOriginal, 2)} <span class="text-xs text-gray-500">${h.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.marketValueTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${h.unrealizedPLTWD >= 0 ? 'text-red-600' : 'text-green-600'}">${formatNumber(h.unrealizedPLTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${h.returnRate >= 0 ? 'text-red-600' : 'text-green-600'}">${(h.returnRate || 0).toFixed(2)}%</td>`; tableBody.appendChild(row); }); }
-    async function renderTransactionsTable() { const tableBody = document.getElementById('transactions-table-body'); tableBody.innerHTML = ''; if (transactions.length === 0) { tableBody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-gray-500">沒有交易紀錄。</td></tr>`; return; } for (const t of [...transactions].reverse()) { const row = document.createElement('tr'); row.className = "hover:bg-gray-50"; const typeText = { buy: '買入', sell: '賣出' }; const typeColor = { buy: 'text-red-500', sell: 'text-green-500' }; const totalAmountOriginal = t.totalCost || (t.quantity * t.price); const transactionDate = t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date; const decimals = isTwStock(t.symbol) ? 0 : 2; row.innerHTML = `<td class="px-6 py-4 whitespace-nowrap">${transactionDate}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.quantity, decimals)}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.totalCostTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${t.id}" class="edit-btn text-indigo-600 hover:text-indigo-900 mr-3">編輯</button><button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900">刪除</button></td>`; tableBody.appendChild(row); }; document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', handleEdit)); document.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', handleDelete)); }
-    function renderSplitsTable() { const tableBody = document.getElementById('splits-table-body'); tableBody.innerHTML = ''; if (userSplits.length === 0) { tableBody.innerHTML = `<tr><td colspan="4" class="text-center py-10 text-gray-500">沒有拆股事件。</td></tr>`; return; } for (const s of [...userSplits].reverse()) { const row = document.createElement('tr'); row.className = "hover:bg-gray-50"; const splitDate = s.date.toDate ? s.date.toDate().toISOString().split('T')[0] : s.date; row.innerHTML = `<td class="px-6 py-4 whitespace-nowrap">${splitDate}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${s.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap">${s.ratio}</td><td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${s.id}" class="delete-split-btn text-red-600 hover:text-red-900">刪除</button></td>`; tableBody.appendChild(row); } document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit)); }
-    function updateDashboard() { const holdingsArray = Object.values(holdings); const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0); const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0); document.getElementById('total-assets').textContent = formatNumber(totalMarketValue, 0); const unrealizedEl = document.getElementById('unrealized-pl'); unrealizedEl.textContent = formatNumber(totalUnrealizedPL, 0); unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`; const realizedEl = document.getElementById('realized-pl'); realizedEl.textContent = formatNumber(realizedPLFromBackend, 0); realizedEl.className = `text-3xl font-bold mt-2 ${realizedPLFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`; const totalReturnEl = document.getElementById('total-return'); totalReturnEl.textContent = `${overallReturnRateFromBackend.toFixed(2)}%`; totalReturnEl.className = `text-3xl font-bold mt-2 ${overallReturnRateFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`; const xirrEl = document.getElementById('xirr-value'); xirrEl.textContent = `${(xirrFromBackend * 100).toFixed(2)}%`; xirrEl.className = `text-3xl font-bold mt-2 ${xirrFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`; window.dispatchEvent(new Event('resize')); }
-    async function handleFormSubmit(e) { e.preventDefault(); if (!userId) return; const id = document.getElementById('transaction-id').value; const transactionData = { date: new Date(document.getElementById('transaction-date').value), symbol: document.getElementById('stock-symbol').value.toUpperCase().trim(), type: document.querySelector('input[name="transaction-type"]:checked').value, quantity: parseFloat(document.getElementById('quantity').value), price: parseFloat(document.getElementById('price').value), currency: document.getElementById('currency').value }; const exchangeRate = parseFloat(document.getElementById('exchange-rate').value); if (transactionData.currency === 'USD' && !isNaN(exchangeRate) && exchangeRate > 0) { transactionData.exchangeRate = exchangeRate; } const totalCost = parseFloat(document.getElementById('total-cost').value); if (!isNaN(totalCost) && totalCost > 0) { transactionData.totalCost = totalCost; } const txCol = collection(db, 'users', userId, 'transactions'); if (id) { await updateDoc(doc(txCol, id), transactionData); } else { await addDoc(txCol, transactionData); } closeModal(); showNotification('success', '交易已儲存'); }
-    async function handleSplitFormSubmit(e) { e.preventDefault(); if (!userId) return; const splitData = { date: new Date(document.getElementById('split-date').value), symbol: document.getElementById('split-symbol').value.toUpperCase().trim(), ratio: parseFloat(document.getElementById('split-ratio').value) }; const splitsCol = collection(db, 'users', userId, 'splits'); await addDoc(splitsCol, splitData); closeSplitModal(); showNotification('success', '拆股事件已新增'); }
-    function handleEdit(e) { const id = e.target.dataset.id; const transaction = transactions.find(t => t.id === id); if (transaction) { openModal(true, transaction); } }
-    async function handleDelete(e) { const id = e.target.dataset.id; showConfirm('確定要刪除這筆交易嗎?', async () => { await deleteDoc(doc(db, 'users', userId, 'transactions', id)); showNotification('success', '交易已刪除'); }); }
-    async function handleDeleteSplit(e) { const id = e.target.dataset.id; showConfirm('確定要刪除此拆股事件嗎?', async () => { await deleteDoc(doc(db, 'users', userId, 'splits', id)); showNotification('success', '拆股事件已刪除'); }); }
-    function openModal(isEdit = false, transaction = null) { const form = document.getElementById('transaction-form'); form.reset(); document.getElementById('transaction-id').value = ''; if (isEdit) { document.getElementById('modal-title').textContent = '編輯交易'; document.getElementById('transaction-id').value = transaction.id; document.getElementById('transaction-date').value = transaction.date.toDate().toISOString().split('T')[0]; document.getElementById('stock-symbol').value = transaction.symbol; document.querySelector(`input[name="transaction-type"][value="${transaction.type}"]`).checked = true; document.getElementById('quantity').value = transaction.quantity; document.getElementById('price').value = transaction.price; document.getElementById('currency').value = transaction.currency; document.getElementById('exchange-rate').value = transaction.exchangeRate || ''; document.getElementById('total-cost').value = transaction.totalCost || ''; } else { document.getElementById('modal-title').textContent = '新增交易'; document.getElementById('transaction-date').value = new Date().toISOString().split('T')[0]; } toggleOptionalFields(); document.getElementById('transaction-modal').classList.remove('hidden'); }
+    
+    // [修正] 補上遺漏的函式
+    function toggleOptionalFields() {
+        const currency = document.getElementById('currency').value;
+        document.getElementById('exchange-rate-field').style.display = (currency === 'USD') ? 'block' : 'none';
+    }
+
+    function renderHoldingsTable() {
+        const tableBody = document.getElementById('holdings-table-body');
+        tableBody.innerHTML = '';
+        const holdingsArray = Object.values(holdings);
+        if (holdingsArray.length === 0) { tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有持股紀錄。</td></tr>`; return; }
+        holdingsArray.sort((a,b) => b.marketValueTWD - a.marketValueTWD).forEach(h => {
+            const row = document.createElement('tr');
+            row.className = "hover:bg-gray-50";
+            const decimals = isTwStock(h.symbol) ? 0 : 2;
+            row.innerHTML = `<td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${h.symbol}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.quantity, decimals)}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.avgCostOriginal, 2)} <span class="text-xs text-gray-500">${h.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.totalCostTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.currentPriceOriginal, 2)} <span class="text-xs text-gray-500">${h.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(h.marketValueTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${h.unrealizedPLTWD >= 0 ? 'text-red-600' : 'text-green-600'}">${formatNumber(h.unrealizedPLTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${h.returnRate >= 0 ? 'text-red-600' : 'text-green-600'}">${(h.returnRate || 0).toFixed(2)}%</td>`;
+            tableBody.appendChild(row);
+        });
+    }
+
+    async function renderTransactionsTable() {
+        const tableBody = document.getElementById('transactions-table-body');
+        tableBody.innerHTML = '';
+        if (transactions.length === 0) { tableBody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-gray-500">沒有交易紀錄。</td></tr>`; return; }
+        for (const t of [...transactions].reverse()) {
+            const row = document.createElement('tr');
+            row.className = "hover:bg-gray-50";
+            const typeText = { buy: '買入', sell: '賣出', dividend: '股息' }; // 修正：加入 dividend
+            const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' }; // 修正：加入 dividend
+            const transactionDate = t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date;
+            const decimals = isTwStock(t.symbol) ? 0 : 2;
+            row.innerHTML = `<td class="px-6 py-4 whitespace-nowrap">${transactionDate}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.quantity, decimals)}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.totalCostTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${t.id}" class="edit-btn text-indigo-600 hover:text-indigo-900 mr-3">編輯</button><button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900">刪除</button></td>`;
+            tableBody.appendChild(row);
+        };
+        document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', handleEdit));
+        document.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', handleDelete));
+    }
+
+    function renderSplitsTable() {
+        const tableBody = document.getElementById('splits-table-body');
+        tableBody.innerHTML = '';
+        if (userSplits.length === 0) { tableBody.innerHTML = `<tr><td colspan="4" class="text-center py-10 text-gray-500">沒有拆股事件。</td></tr>`; return; }
+        for (const s of [...userSplits].reverse()) {
+            const row = document.createElement('tr');
+            row.className = "hover:bg-gray-50";
+            const splitDate = s.date.toDate ? s.date.toDate().toISOString().split('T')[0] : s.date;
+            row.innerHTML = `<td class="px-6 py-4 whitespace-nowrap">${splitDate}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${s.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap">${s.ratio}</td><td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${s.id}" class="delete-split-btn text-red-600 hover:text-red-900">刪除</button></td>`;
+            tableBody.appendChild(row);
+        }
+        document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit));
+    }
+
+    function updateDashboard() {
+        const holdingsArray = Object.values(holdings);
+        const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
+        const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
+        document.getElementById('total-assets').textContent = formatNumber(totalMarketValue, 0);
+        const unrealizedEl = document.getElementById('unrealized-pl');
+        unrealizedEl.textContent = formatNumber(totalUnrealizedPL, 0);
+        unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
+        const realizedEl = document.getElementById('realized-pl');
+        realizedEl.textContent = formatNumber(realizedPLFromBackend, 0);
+        realizedEl.className = `text-3xl font-bold mt-2 ${realizedPLFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
+        const totalReturnEl = document.getElementById('total-return');
+        totalReturnEl.textContent = `${overallReturnRateFromBackend.toFixed(2)}%`;
+        totalReturnEl.className = `text-3xl font-bold mt-2 ${overallReturnRateFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
+        const xirrEl = document.getElementById('xirr-value');
+        xirrEl.textContent = `${(xirrFromBackend * 100).toFixed(2)}%`;
+        xirrEl.className = `text-3xl font-bold mt-2 ${xirrFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
+        window.dispatchEvent(new Event('resize'));
+    }
+
+    async function handleFormSubmit(e) {
+        e.preventDefault();
+        if (!userId) return;
+        const id = document.getElementById('transaction-id').value;
+        const transactionData = {
+            date: new Date(document.getElementById('transaction-date').value),
+            symbol: document.getElementById('stock-symbol').value.toUpperCase().trim(),
+            type: document.querySelector('input[name="transaction-type"]:checked').value,
+            quantity: parseFloat(document.getElementById('quantity').value),
+            price: parseFloat(document.getElementById('price').value),
+            currency: document.getElementById('currency').value,
+        };
+        const exchangeRate = parseFloat(document.getElementById('exchange-rate').value);
+        if (transactionData.currency === 'USD' && !isNaN(exchangeRate) && exchangeRate > 0) {
+            transactionData.exchangeRate = exchangeRate;
+        }
+        const totalCost = parseFloat(document.getElementById('total-cost').value);
+        if (!isNaN(totalCost) && totalCost > 0) {
+            transactionData.totalCost = totalCost;
+        }
+        const txCol = collection(db, 'users', userId, 'transactions');
+        if (id) {
+            await updateDoc(doc(txCol, id), transactionData);
+        } else {
+            await addDoc(txCol, transactionData);
+        }
+        closeModal();
+        showNotification('success', '交易已儲存');
+    }
+
+    async function handleSplitFormSubmit(e) {
+        e.preventDefault();
+        if (!userId) return;
+        const splitData = { date: new Date(document.getElementById('split-date').value), symbol: document.getElementById('split-symbol').value.toUpperCase().trim(), ratio: parseFloat(document.getElementById('split-ratio').value) };
+        const splitsCol = collection(db, 'users', userId, 'splits');
+        await addDoc(splitsCol, splitData);
+        closeSplitModal();
+        showNotification('success', '拆股事件已新增');
+    }
+
+    function handleEdit(e) {
+        const id = e.target.dataset.id;
+        const transaction = transactions.find(t => t.id === id);
+        if (transaction) {
+            openModal(true, transaction);
+        }
+    }
+    async function handleDelete(e) {
+        const id = e.target.dataset.id;
+        showConfirm('確定要刪除這筆交易嗎?', async () => {
+            await deleteDoc(doc(db, 'users', userId, 'transactions', id));
+            showNotification('success', '交易已刪除');
+        });
+    }
+    async function handleDeleteSplit(e) {
+        const id = e.target.dataset.id;
+        showConfirm('確定要刪除此拆股事件嗎?', async () => {
+            await deleteDoc(doc(db, 'users', userId, 'splits', id));
+            showNotification('success', '拆股事件已刪除');
+        });
+    }
+    function openModal(isEdit = false, transaction = null) {
+        const form = document.getElementById('transaction-form'); form.reset();
+        document.getElementById('transaction-id').value = '';
+        if (isEdit) {
+            document.getElementById('modal-title').textContent = '編輯交易';
+            document.getElementById('transaction-id').value = transaction.id;
+            document.getElementById('transaction-date').value = transaction.date.toDate().toISOString().split('T')[0];
+            document.getElementById('stock-symbol').value = transaction.symbol;
+            document.querySelector(`input[name="transaction-type"][value="${transaction.type}"]`).checked = true;
+            document.getElementById('quantity').value = transaction.quantity;
+            document.getElementById('price').value = transaction.price;
+            document.getElementById('currency').value = transaction.currency;
+            document.getElementById('exchange-rate').value = transaction.exchangeRate || '';
+            document.getElementById('total-cost').value = transaction.totalCost || '';
+        } else {
+            document.getElementById('modal-title').textContent = '新增交易';
+            document.getElementById('transaction-date').value = new Date().toISOString().split('T')[0];
+        }
+        toggleOptionalFields();
+        document.getElementById('transaction-modal').classList.remove('hidden');
+    }
     function openSplitModal() { document.getElementById('split-form').reset(); document.getElementById('split-modal').classList.remove('hidden'); }
     function closeModal() { document.getElementById('transaction-modal').classList.add('hidden'); }
     function closeSplitModal() { document.getElementById('split-modal').classList.add('hidden'); }
