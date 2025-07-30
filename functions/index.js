@@ -428,17 +428,26 @@ function calculateXIRR(flows) {
   const years = dates.map(d => (d - dates[0]) / (365 * 24 * 60 * 60 * 1000));
   const npv = r => amounts.reduce((s, v, i) => s + v / Math.pow(1 + r, years[i]), 0);
   const dnpv = r => amounts.reduce((s, v, i) => s - v * years[i] / Math.pow(1 + r, years[i] + 1), 0);
-  let r = 0.1;
-  for (let i = 0; i < 100; i++) {
-    const f = npv(r);
-    const f1 = dnpv(r);
-    if (Math.abs(f1) < 1e-9) break;
-    const nr = r - f / f1;
-    if (Math.abs(nr - r) < 1e-6) return nr;
-    r = nr;
+
+  // 用多初始值增加穩定性
+  for(let base = 0; base <= 4; base++) {
+    let r = 0.1 + base * 0.2;       // 多組起點，0.1, 0.3, 0.5, ...
+    for(let i = 0; i < 300; i++) {   // 迭代數加多
+      const f = npv(r);
+      const f1 = dnpv(r);
+      if (Math.abs(f1) < 1e-10) {
+        r += 0.1;
+        continue;                    // 碰到平坦區就換新猜值
+      }
+      const nr = r - f / f1;
+      if (!isFinite(nr)) break;
+      if (Math.abs(nr - r) < 1e-6) return nr;  // 收斂即回值
+      r = nr;
+    }
   }
   return null;
 }
+
 
 function dailyValue(state, market, date) {
   let tot = 0;
