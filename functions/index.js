@@ -376,45 +376,53 @@ function calculatePortfolioHistory(evts,market){
   return hist;
 }
 
-function createCashflows(evts,pf,holdings,market){
-  const flows=[];
+function createCashflows(evts, pf, holdings, market) {
+  const flows = [];
 
-  /* ---------- 交易現金流（含手續費稅） ---------- */
-  evts.filter(e=>e.eventType==="transaction").forEach(t=>{
-    const fx = findFxRate(market,t.currency,t.date);
-    const amt = getTotalCost(t) * (t.currency==="TWD"?1:fx);
-    flows.push({date:toDate(t.date),amount: t.type==="buy"? -amt : amt});
+  // ---------- 交易現金流 ----------
+  evts.filter(e => e.eventType === "transaction").forEach(t => {
+    const fx = findFxRate(market, t.currency, t.date);
+    const amt = getTotalCost(t) * (t.currency === "TWD" ? 1 : fx);
+    flows.push({ date: toDate(t.date), amount: t.type === "buy" ? -amt : amt });
   });
 
-  /* ---------- 股利 ---------- */
-  evts.filter(e=>e.eventType==="dividend").forEach(d=>{
-    const fx = findFxRate(market,pf[d.symbol]?.currency||"USD",d.date);
-    const shares=pf[d.symbol]?.lots.reduce((s,l)=>s+l.quantity,0)||0;
-    const amt=d.amount*shares*(pf[d.symbol]?.currency==="TWD"?1:fx);
-    if(amt>0) flows.push({date:new Date(d.date),amount:amt});
+  // ---------- 股利 ----------
+  evts.filter(e => e.eventType === "dividend").forEach(d => {
+    const fx = findFxRate(market, pf[d.symbol]?.currency || "USD", d.date);
+    const shares = pf[d.symbol]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
+    const amt = d.amount * shares * (pf[d.symbol]?.currency === "TWD" ? 1 : fx);
+    if (amt > 0) flows.push({ date: new Date(d.date), amount: amt });
   });
 
-  /* ---------- 殘值 (= 今日市值) ---------- */
-  const mktVal = Object.values(holdings)
-                  .reduce((s,h)=>s+h.marketValueTWD,0);
-  if(mktVal>0){
+  // ---------- 殘值（市值） ----------
+  const mktVal = Object.values(holdings).reduce((s, h) => s + h.marketValueTWD, 0);
+  if (mktVal > 0) {
     const today = new Date();
-    flows.push({date:today, amount:-mktVal});   // 負向殘值
-    flows.push({date:today, amount: mktVal});   // 假設同日變現
+    flows.push({ date: today, amount: -mktVal }); // 殘值支出
+    flows.push({ date: today, amount: mktVal });  // 殘值收入
   }
-  
-  // --- 關鍵：依日期早→晚排序 ---
-  //flows.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  flows.sort((a,b)=> new Date(a.date)-new Date(b.date));
-  console.table(flows.map(f=>({
-  date: f.date.toISOString().slice(0,10),
-  amt : f.amount
+  // ---------- 日合併淨額、依日期排序 ----------
+  const combineByDate = {};
+  flows.forEach(f => {
+    const k = (f.date instanceof Date ? f.date.toISOString().slice(0, 10) : String(f.date));
+    combineByDate[k] = (combineByDate[k] || 0) + f.amount;
+  });
+  const mergedFlows = Object.entries(combineByDate)
+    .filter(([date, amt]) => Math.abs(amt) > 1e-6) // 淨額不為零才保留
+    .map(([date, amt]) => ({ date: new Date(date), amount: amt }))
+    .sort((a, b) => a.date - b.date);
+
+  // Debug log：印出現金流（可留可去）
+  console.table(mergedFlows.map(f => ({
+    date: f.date.toISOString().slice(0, 10),
+    amt: f.amount
   })));
-  
-  return flows;
 
+  // ---------- 關鍵：return 淨額合併後的新 flows ----------
+  return mergedFlows;
 }
+
 
 function calculateXIRR(flows){
   if(flows.length<2)return 0;
