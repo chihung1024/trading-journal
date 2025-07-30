@@ -45,6 +45,27 @@
                 </div>
             </div>
         </header>
+        
+        <div id="welcome-modal" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 hidden">
+            <div class="max-w-md mx-auto bg-white rounded-lg shadow-md p-8 text-center">
+                <i data-lucide="line-chart" class="text-indigo-600 h-16 w-16 mx-auto mb-4"></i>
+                <h2 class="text-2xl font-bold text-gray-800 mb-2">歡迎使用交易分析系統</h2>
+                <p class="text-gray-600 mb-8">請選擇您的登入方式</p>
+                <div class="space-y-4">
+                    <button type="button" id="email-choice-btn" class="w-full btn bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg shadow-md hover:bg-indigo-700">
+                        使用 Email 登入 / 註冊
+                    </button>
+                    <button type="button" id="anonymous-login-btn" class="w-full btn bg-gray-200 text-gray-700 font-bold py-3 px-4 rounded-lg hover:bg-gray-300">
+                        匿名繼續使用
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 mt-6">
+                    <i data-lucide="alert-triangle" class="inline-block h-4 w-4"></i>
+                    匿名資料儲存在您的瀏覽器中，若清除快取或更換裝置，資料將會遺失。
+                </p>
+            </div>
+        </div>
+        
         <div id="auth-container" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 hidden">
             <div class="max-w-md mx-auto bg-white rounded-lg shadow-md p-8">
                 <h2 class="text-2xl font-bold text-center text-gray-800 mb-6">登入或註冊</h2>
@@ -353,6 +374,267 @@
                 xirrFromBackend = data.xirr || 0;
             } else {
                 holdings = {};
+                realizedPLFromBackend = 0;<script type="module">
+    // --- Firebase SDK ---
+    import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    // [修改] 再次引入 signInAnonymously
+    import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import { getFirestore, collection, doc, addDoc, onSnapshot, updateDoc, deleteDoc, query, orderBy, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    // =================================================================================
+    // === Firebase 設定 (請貼上您的設定) ===
+    // =================================================================================
+    const firebaseConfig = {
+        apiKey: "AIzaSyAlymQXtutAG8UY48-TehVU70jD9RmCiBE",
+        authDomain: "trading-journal-4922c.firebaseapp.com",
+        projectId: "trading-journal-4922c",
+        storageBucket: "trading-journal-4922c.appspot.com",
+        messagingSenderId: "50863752247",
+        appId: "1:50863752247:web:766eaa892d2c8d28bb6bb2"
+    };
+    // =================================================================================
+
+    // --- 全域變數 ---
+    let db, auth;
+    let transactions = [];
+    let userSplits = [];
+    let holdings = {};
+    let chart;
+    let userId;
+    let realizedPLFromBackend = 0;
+    let overallReturnRateFromBackend = 0;
+    let xirrFromBackend = 0;
+    
+    let transactionsUnsubscribe = null;
+    let splitsUnsubscribe = null;
+    let historyUnsubscribe = null;
+    let holdingsUnsubscribe = null;
+    let confirmCallback = null;
+
+    const exchangeRateCache = new Map();
+    let dataLoaded = { transactions: false, holdings: false, splits: false };
+
+    // --- 主程式入口 ---
+    document.addEventListener('DOMContentLoaded', () => {
+        initialize();
+    });
+
+    // --- 核心函式 ---
+    async function initialize() {
+        if (!firebaseConfig.projectId) {
+            showLoadingError("設定錯誤！", "您的 firebaseConfig 中缺少 projectId。");
+            return;
+        }
+
+        try {
+            const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+            auth = getAuth(app);
+            db = getFirestore(app);
+            setupEventListeners();
+            initializeChart();
+            lucide.createIcons();
+            handleAuthentication();
+        } catch (error) {
+            console.error("Firebase 初始化失敗:", error);
+            showLoadingError("Firebase 初始化失敗！", "請檢查 firebaseConfig 是否正確。");
+        }
+    }
+
+    // [修改] 全面修改驗證處理邏輯，以包含歡迎視窗
+    function handleAuthentication() {
+        onAuthStateChanged(auth, (user) => {
+            const loadingOverlay = document.getElementById('loading-overlay');
+            const mainContent = document.querySelector('main');
+            const authContainer = document.getElementById('auth-container');
+            const welcomeModal = document.getElementById('welcome-modal');
+            const userInfo = document.getElementById('user-info');
+            const logoutBtn = document.getElementById('logout-btn');
+
+            loadingOverlay.style.display = 'flex'; // 先顯示載入中
+
+            if (user) {
+                // --- 使用者已登入 (無論是匿名或Email) ---
+                userId = user.uid;
+                
+                // 更新UI
+                document.getElementById('auth-status').textContent = user.isAnonymous ? '訪客模式' : '已連線';
+                document.getElementById('user-id').textContent = user.isAnonymous ? `訪客ID: ${user.uid.substring(0,8)}...` : `使用者: ${user.email}`;
+                
+                welcomeModal.classList.add('hidden');
+                authContainer.classList.add('hidden');
+                mainContent.classList.remove('hidden');
+                userInfo.classList.remove('hidden');
+                logoutBtn.classList.remove('hidden');
+                
+                // 設定資料監聽
+                setupDataListeners();
+            } else {
+                // --- 使用者已登出或從未登入 ---
+                userId = null;
+                
+                // 清理舊的監聽器
+                if (transactionsUnsubscribe) transactionsUnsubscribe();
+                if (splitsUnsubscribe) splitsUnsubscribe();
+                if (historyUnsubscribe) historyUnsubscribe();
+                if (holdingsUnsubscribe) holdingsUnsubscribe();
+
+                // 更新UI，顯示歡迎視窗
+                loadingOverlay.style.display = 'none';
+                welcomeModal.classList.remove('hidden'); // 顯示歡迎視窗
+                authContainer.classList.add('hidden');
+                mainContent.classList.add('hidden');
+                userInfo.classList.add('hidden');
+                logoutBtn.classList.add('hidden');
+            }
+        });
+    }
+
+    // [修改] 加入歡迎視窗的按鈕事件監聽
+    function setupEventListeners() {
+        // 原有監聽器
+        document.getElementById('add-transaction-btn').addEventListener('click', () => openModal());
+        document.getElementById('cancel-btn').addEventListener('click', closeModal);
+        document.getElementById('modal-backdrop-trans').addEventListener('click', closeModal);
+        document.getElementById('transaction-form').addEventListener('submit', handleFormSubmit);
+        
+        document.getElementById('manage-splits-btn').addEventListener('click', openSplitModal);
+        document.getElementById('cancel-split-btn').addEventListener('click', closeSplitModal);
+        document.getElementById('modal-backdrop-split').addEventListener('click', closeSplitModal);
+        document.getElementById('split-form').addEventListener('submit', handleSplitFormSubmit);
+
+        document.getElementById('tabs').addEventListener('click', (e) => { e.preventDefault(); if (e.target.matches('.tab-item')) { switchTab(e.target.dataset.tab); } });
+        document.getElementById('confirm-cancel-btn').addEventListener('click', hideConfirm);
+        document.getElementById('confirm-ok-btn').addEventListener('click', () => { if (confirmCallback) { confirmCallback(); } hideConfirm(); });
+        document.getElementById('currency').addEventListener('change', toggleOptionalFields);
+
+        // Email/密碼表單的按鈕
+        document.getElementById('login-btn').addEventListener('click', handleLogin);
+        document.getElementById('register-btn').addEventListener('click', handleRegister);
+        document.getElementById('logout-btn').addEventListener('click', handleLogout);
+
+        // [新增] 歡迎視窗的按鈕
+        document.getElementById('email-choice-btn').addEventListener('click', () => {
+            document.getElementById('welcome-modal').classList.add('hidden');
+            document.getElementById('auth-container').classList.remove('hidden');
+        });
+        document.getElementById('anonymous-login-btn').addEventListener('click', handleAnonymousLogin);
+    }
+    
+    // [新增] 處理匿名登入的函式
+    async function handleAnonymousLogin() {
+        try {
+            await signInAnonymously(auth);
+            showNotification('success', '已作為訪客登入。');
+        } catch (error) {
+            console.error("匿名登入失敗:", error);
+            showNotification('error', `匿名登入失敗: ${error.message}`);
+        }
+    }
+    
+    // 以下函式與前一版本相同
+    // handleRegister, handleLogin, handleLogout...
+
+    async function handleRegister() {
+        const email = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+        if (!email || !password) {
+            showNotification('error', '請輸入電子郵件和密碼。');
+            return;
+        }
+        try {
+            await createUserWithEmailAndPassword(auth, email, password);
+            showNotification('success', '註冊成功！已自動登入。');
+        } catch (error) {
+            console.error("註冊失敗:", error);
+            showNotification('error', `註冊失敗: ${error.message}`);
+        }
+    }
+
+    async function handleLogin() {
+        const email = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+        if (!email || !password) {
+            showNotification('error', '請輸入電子郵件和密碼。');
+            return;
+        }
+        try {
+            await signInWithEmailAndPassword(auth, email, password);
+            showNotification('success', '登入成功！');
+        } catch (error) {
+            console.error("登入失敗:", error);
+            showNotification('error', `登入失敗: ${error.message}`);
+        }
+    }
+
+    async function handleLogout() {
+        try {
+            await signOut(auth);
+            // 清理畫面資料
+            transactions = [];
+            userSplits = [];
+            holdings = {};
+            renderAll();
+            chart.updateSeries([{ data: [] }]);
+            showNotification('info', '您已成功登出。');
+        } catch (error) {
+            console.error("登出失敗:", error);
+            showNotification('error', `登出失敗: ${error.message}`);
+        }
+    }
+
+    function toggleOptionalFields() {
+        const currency = document.getElementById('currency').value;
+        const exchangeRateField = document.getElementById('exchange-rate-field');
+        if (currency === 'USD') {
+            exchangeRateField.style.display = 'block';
+        } else {
+            exchangeRateField.style.display = 'none';
+        }
+    }
+
+    function setupDataListeners() {
+        // ... 此函式及以下所有函式與前一版本完全相同 ...
+        // 您可以將前一版本中從此處開始到結尾的程式碼完整複製過來
+        if (!userId) return; // 如果沒有 userId，則不執行
+
+        if (transactionsUnsubscribe) transactionsUnsubscribe();
+        if (splitsUnsubscribe) splitsUnsubscribe();
+        if (historyUnsubscribe) historyUnsubscribe();
+        if (holdingsUnsubscribe) holdingsUnsubscribe();
+        
+        // 重設資料狀態
+        dataLoaded = { transactions: false, holdings: false, splits: false };
+        transactions = [];
+        userSplits = [];
+        holdings = {};
+
+
+        const transactionsCol = collection(db, 'users', userId, 'transactions');
+        const tq = query(transactionsCol, orderBy("date", "asc"));
+        transactionsUnsubscribe = onSnapshot(tq, (snapshot) => {
+            transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            dataLoaded.transactions = true;
+            updateExchangeRateCache().then(() => renderAll());
+        }, (error) => console.error("讀取交易紀錄失敗:", error));
+
+        const splitsCol = collection(db, 'users', userId, 'splits');
+        const sq = query(splitsCol, orderBy("date", "asc"));
+        splitsUnsubscribe = onSnapshot(sq, (snapshot) => {
+            userSplits = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            dataLoaded.splits = true;
+            renderAll();
+        }, (error) => console.error("讀取拆股事件失敗:", error));
+        
+        const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
+        holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                holdings = data.holdings || {};
+                realizedPLFromBackend = data.totalRealizedPL || 0;
+                overallReturnRateFromBackend = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
+                xirrFromBackend = data.xirr || 0;
+            } else {
+                holdings = {};
                 realizedPLFromBackend = 0;
                 overallReturnRateFromBackend = 0;
                 xirrFromBackend = 0;
@@ -386,9 +668,6 @@
         }
     }
     
-    // --- 核心渲染 ---
-    // (此處 renderHoldingsTable, renderTransactionsTable, renderSplitsTable, updateDashboard, initializeChart, updateAssetChart 等函式無需修改)
-    // ... 將您原本的這些函式複製到這裡 ...
     function renderHoldingsTable() {
         const tableBody = document.getElementById('holdings-table-body');
         tableBody.innerHTML = '';
@@ -530,9 +809,6 @@
         chart.updateSeries([{ data: chartData }]);
     }
     
-    // --- 匯率快取 & 表單處理 ---
-    // (此處 updateExchangeRateCache, findNearestAvailableRate, handleFormSubmit, handleSplitFormSubmit, handleDelete, handleDeleteSplit, handleEdit, openModal, closeModal 等函式無需修改)
-    // ... 將您原本的這些函式複製到這裡 ...
     async function updateExchangeRateCache() {
         const uniqueDates = [...new Set(transactions.map(t => t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date))];
         const rateDocRef = doc(db, 'exchange_rates', 'TWD=X');
@@ -732,9 +1008,6 @@
     function closeSplitModal() { document.getElementById('split-modal').classList.add('hidden'); }
     function hideConfirm() { confirmCallback = null; document.getElementById('confirm-modal').classList.add('hidden'); }
 
-    // --- 輔助函式 ---
-    // (此處 isTwStock, formatNumber, showNotification, showConfirm, showLoadingError, switchTab 等函式無需修改)
-    // ... 將您原本的這些函式複製到這裡 ...
     function isTwStock(symbol) {
         if (!symbol) return false;
         const upperSymbol = symbol.toUpperCase();
