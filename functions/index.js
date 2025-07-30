@@ -43,9 +43,12 @@ function findFxRate(market, currency, date, tolerance = 15) {
 }
 
 // --- 核心計算函式 ---
+
+// [最終修正] 恢復對未來拆股事件的校正邏輯
 function getPortfolioStateOnDate(allEvts, targetDate) {
     const state = {};
-    const pastEvents = allEvts.filter(e => toDate(e.date) <= targetDate);
+    const pastEvents = allEvts.filter(e => toDate(e.date) <= toDate(targetDate));
+    const futureSplits = allEvts.filter(e => e.eventType === 'split' && toDate(e.date) > toDate(targetDate));
 
     for (const e of pastEvents) {
         const sym = e.symbol.toUpperCase();
@@ -78,6 +81,18 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
             });
         }
     }
+
+    // 對計算出的當日股數，應用未來拆股的校正
+    for (const sym in state) {
+        futureSplits
+            .filter(s => s.symbol.toUpperCase() === sym)
+            .forEach(split => {
+                state[sym].lots.forEach(lot => {
+                    lot.quantity *= split.ratio;
+                });
+            });
+    }
+
     return state;
 }
 
@@ -89,11 +104,11 @@ function dailyValue(state, market, date) {
         
         const price = findNearest(market[sym]?.prices, date);
         if (price === undefined) {
-            const yesterday = new Date(date);
-            yesterday.setDate(yesterday.getDate() - 1);
-            const firstDateInLots = s.lots.length > 0 ? toDate(s.lots[0].date || 0) : date;
-            if (yesterday < firstDateInLots) return totalValue;
-            return totalValue + dailyValue({[sym]: s}, market, yesterday);
+             const yesterday = new Date(date);
+             yesterday.setDate(yesterday.getDate() - 1);
+             const firstEventDate = toDate(s.lots[0]?.date || date);
+             if (yesterday < firstEventDate) return totalValue; // 防止無限遞迴
+             return totalValue + dailyValue({[sym]: s}, market, yesterday);
         }
         
         const fx = findFxRate(market, s.currency, date);
@@ -165,7 +180,7 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
         const dateStr = toDate(e.date).toISOString().split('T')[0];
         let flow = 0;
         const currency = e.currency || market[e.symbol.toUpperCase()]?.currency || 'USD';
-        const fx = findFxRate(market, currency, e.date);
+        const fx = findFxRate(market, currency, toDate(e.date));
 
         if (e.eventType === 'transaction') {
             const cost = getTotalCost(e);
@@ -189,12 +204,13 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
     let lastMarketValue = 0;
 
     for (const dateStr of dates) {
-        const MVE = dailyPortfolioValues[dateStr]; // 當期期末價值
-        const CF = cashflows[dateStr] || 0; // 當期現金流
+        const MVE = dailyPortfolioValues[dateStr]; 
+        const CF = cashflows[dateStr] || 0; 
 
         const denominator = lastMarketValue + CF;
         if (denominator !== 0) {
-            cumulativeHpr *= MVE / denominator;
+            const periodReturn = MVE / denominator;
+            cumulativeHpr *= periodReturn;
         }
 
         twrHistory[dateStr] = (cumulativeHpr - 1) * 100;
@@ -241,7 +257,7 @@ function calculateFinalHoldings(pf, market) {
 function createCashflowsForXirr(evts, holdings, market) {
     const flows = [];
     evts.filter(e => e.eventType === "transaction").forEach(t => {
-        const fx = findFxRate(market, t.currency, t.date);
+        const fx = findFxRate(market, t.currency, toDate(t.date));
         const amt = getTotalCost(t) * (t.currency === "TWD" ? 1 : fx);
         flows.push({ date: toDate(t.date), amount: t.type === "buy" ? -amt : amt });
     });
@@ -250,7 +266,7 @@ function createCashflowsForXirr(evts, holdings, market) {
         const currency = stateOnDate[d.symbol.toUpperCase()]?.currency || 'USD';
         const shares = stateOnDate[d.symbol.toUpperCase()]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
         if (shares > 0) {
-            const fx = findFxRate(market, currency, d.date);
+            const fx = findFxRate(market, currency, toDate(d.date));
             const amt = d.amount * shares * (currency === "TWD" ? 1 : fx);
             flows.push({ date: toDate(d.date), amount: amt });
         }
@@ -282,10 +298,10 @@ function calculateXIRR(flows) {
         const npv = amounts.reduce((sum, amount, j) => sum + amount / Math.pow(1 + guess, years[j]), 0);
         if (Math.abs(npv) < 1e-6) return guess;
         const derivative = amounts.reduce((sum, amount, j) => sum - years[j] * amount / Math.pow(1 + guess, years[j] + 1), 0);
-        if (derivative === 0) break;
+        if (Math.abs(derivative) < 1e-9) break;
         guess -= npv / derivative;
     }
-    return null;
+    return npv < 1e-6 ? guess : null;
 }
 
 function calculateCoreMetrics(evts, market, log) {
@@ -296,10 +312,10 @@ function calculateCoreMetrics(evts, market, log) {
         if (!pf[sym]) pf[sym] = { lots: [], currency: e.currency || "USD", realizedPLTWD: 0, realizedCostTWD: 0 };
         switch (e.eventType) {
             case "transaction": {
-                const fx = findFxRate(market, e.currency, e.date);
+                const fx = findFxRate(market, e.currency, toDate(e.date));
                 const costTWD = getTotalCost(e) * (e.currency === "TWD" ? 1 : fx);
                 if (e.type === "buy") {
-                    pf[sym].lots.push({ quantity: e.quantity, pricePerShareOriginal: e.price, pricePerShareTWD: costTWD / e.quantity });
+                    pf[sym].lots.push({ quantity: e.quantity, pricePerShareOriginal: e.price, pricePerShareTWD: costTWD / e.quantity, date: toDate(e.date) });
                 } else {
                     let sellQty = e.quantity;
                     const saleProceedsTWD = costTWD;
@@ -330,7 +346,7 @@ function calculateCoreMetrics(evts, market, log) {
                 const stateOnDate = getPortfolioStateOnDate(evts, toDate(e.date));
                 const shares = stateOnDate[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
                 if (shares > 0) {
-                    const fx = findFxRate(market, pf[sym].currency, e.date);
+                    const fx = findFxRate(market, pf[sym].currency, toDate(e.date));
                     const divTWD = e.amount * shares * (pf[sym].currency === "TWD" ? 1 : fx);
                     totalRealizedPL += divTWD;
                     pf[sym].realizedPLTWD += divTWD;
@@ -342,13 +358,13 @@ function calculateCoreMetrics(evts, market, log) {
     const holdings = calculateFinalHoldings(pf, market);
     const xirrFlows = createCashflowsForXirr(evts, holdings, market);
     const xirr = calculateXIRR(xirrFlows);
-    const totalInvestedCost = Object.values(pf).reduce((sum, p) => sum + p.lots.reduce((s,l) => s + l.quantity * l.pricePerShareTWD, 0) + p.realizedCostTWD, 0);
-    const totalReturnValue = totalRealizedPL + Object.values(holdings).reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
+    const totalUnrealizedPL = Object.values(holdings).reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
+    const totalInvestedCost = Object.values(holdings).reduce((sum, h) => sum + h.totalCostTWD, 0) + Object.values(pf).reduce((sum, p) => sum + p.realizedCostTWD, 0);
+    const totalReturnValue = totalRealizedPL + totalUnrealizedPL;
     const overallReturnRate = totalInvestedCost > 0 ? (totalReturnValue / totalInvestedCost) * 100 : 0;
     return { holdings, totalRealizedPL, xirr, overallReturnRate };
 }
 
-// --- Market Data Fetching ---
 async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
   const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
   const currencies = [...new Set(txs.map(t => t.currency || "USD"))].filter(c => c !== "TWD");
@@ -481,7 +497,7 @@ exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: 
     }
     return null;
   });
-
+  
 exports.onBenchmarkUpdate = functions.firestore
     .document('users/{uid}/controls/benchmark_control')
     .onWrite(async (chg, ctx) => {
