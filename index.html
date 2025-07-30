@@ -40,9 +40,9 @@
                 </div>
             </div>
         </header>
-
+        
         <div id="auth-container" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 hidden">
-            <div class="max-w-md mx-auto bg-white rounded-lg shadow-md p-8">
+             <div class="max-w-md mx-auto bg-white rounded-lg shadow-md p-8">
                 <h2 class="text-2xl font-bold text-center text-gray-800 mb-6">登入或註冊</h2>
                 <form id="auth-form">
                     <div class="mb-4">
@@ -130,6 +130,7 @@
         import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
         import { getFirestore, collection, doc, addDoc, onSnapshot, updateDoc, deleteDoc, query, orderBy, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
+        // --- Firebase Configuration ---
         const firebaseConfig = {
             apiKey: "AIzaSyAlymQXtutAG8UY48-TehVU70jD9RmCiBE",
             authDomain: "trading-journal-4922c.firebaseapp.com",
@@ -174,7 +175,7 @@
                 handleAuthentication();
             } catch (error) {
                 console.error("Firebase 初始化失敗:", error);
-                showLoadingError("Firebase 初始化失敗！", "請檢查 firebaseConfig 是否正確。");
+                showLoadingError("Firebase 初始化失敗！", `請檢查 console log: ${error.message}`);
             }
         }
 
@@ -237,7 +238,45 @@
                 }
             });
         }
+        
+        async function handleRegister() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; }
+            try {
+                await createUserWithEmailAndPassword(auth, email, password);
+                showNotification('success', '註冊成功！已自動登入。');
+            } catch (error) {
+                console.error("註冊失敗:", error);
+                showNotification('error', `註冊失敗: ${error.message}`);
+            }
+        }
 
+        async function handleLogin() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; }
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+                showNotification('success', '登入成功！');
+            } catch (error) {
+                console.error("登入失敗:", error);
+                showNotification('error', `登入失敗: ${error.message}`);
+            }
+        }
+
+        async function handleLogout() {
+            try {
+                await signOut(auth);
+                transactions = [];
+                userSplits = [];
+                showNotification('info', '您已成功登出。');
+            } catch (error) {
+                console.error("登出失敗:", error);
+                showNotification('error', `登出失敗: ${error.message}`);
+            }
+        }
+        
         // --- Event Listeners ---
         function setupEventListeners() {
             document.getElementById('add-transaction-btn').addEventListener('click', () => openModal());
@@ -312,15 +351,14 @@
             
             const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
             holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
-                let currentHoldings = {}, currentRealizedPL = 0, currentOverallReturn = 0, currentXIRR = 0, benchmarkSymbol = 'SPY';
+                let currentHoldings = {}, currentRealizedPL = 0, currentOverallReturn = 0, currentXIRR = 0;
                 if (docSnap.exists()) {
                     const data = docSnap.data();
                     currentHoldings = data.holdings || {};
                     currentRealizedPL = data.totalRealizedPL || 0;
-                    currentOverallReturn = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
+                    currentOverallReturn = data.overallReturnRate || 0;
                     currentXIRR = data.xirr || 0;
-                    benchmarkSymbol = data.benchmarkSymbol || 'SPY';
-                    document.getElementById('benchmark-symbol-input').value = benchmarkSymbol;
+                    document.getElementById('benchmark-symbol-input').value = data.benchmarkSymbol || 'SPY';
                 }
                 dataLoaded.holdings = true;
                 renderHoldingsTable(currentHoldings);
@@ -474,6 +512,17 @@
                 .sort((a, b) => new Date(a[0]) - new Date(b[0]))
                 .map(([date, value]) => [new Date(date).getTime(), value]);
             chart.updateSeries([{ data: chartData }]);
+        }
+        
+        function updateTwrChart(twrHistory, benchmarkHistory, benchmarkSymbol) {
+            const formatHistory = (history) => history ? Object.entries(history)
+                .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+                .map(([date, value]) => [new Date(date).getTime(), value]) : [];
+
+            twrChart.updateSeries([
+                { name: '投資組合', data: formatHistory(twrHistory) },
+                { name: `Benchmark (${benchmarkSymbol || '...'})`, data: formatHistory(benchmarkHistory) }
+            ]);
         }
         
         // --- Utility & Form Handling Functions ---
@@ -642,6 +691,16 @@
         function closeSplitModal() { document.getElementById('split-modal').classList.add('hidden'); }
         function hideConfirm() { confirmCallback = null; document.getElementById('confirm-modal').classList.add('hidden'); }
 
+        function toggleOptionalFields() {
+            const currency = document.getElementById('currency').value;
+            const exchangeRateField = document.getElementById('exchange-rate-field');
+            if (currency === 'USD') {
+                exchangeRateField.style.display = 'block';
+            } else {
+                exchangeRateField.style.display = 'none';
+            }
+        }
+        
         function isTwStock(symbol) {
             if (!symbol) return false;
             const upperSymbol = symbol.toUpperCase();
