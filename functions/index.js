@@ -1,3 +1,94 @@
+/* eslint-disable */
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+const yahooFinance = require("yahoo-finance2").default;
+
+admin.initializeApp();
+const db = admin.firestore();
+
+/* ---------- utils ---------- */
+function getTotalCost(tx) {
+  return (tx.totalCost !== undefined && tx.totalCost !== null)
+    ? Number(tx.totalCost)
+    : Number(tx.price || 0) * Number(tx.quantity || 0);
+}
+
+/* 幣別對照表 */
+const currencyToFx = {
+  USD: "TWD=X",
+  HKD: "HKD=TWD",
+  JPY: "JPY=TWD"
+  // TWD 省略
+};
+
+/* ================================================================
+ * 核心： Portfolio Recalculation
+ * ================================================================ */
+async function performRecalculation(uid) {
+  const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
+  const logs = [];
+  const log = msg => {
+    const ts = new Date().toISOString();
+    logs.push(`${ts}: ${msg}`);
+    console.log(`[${uid}] ${ts}: ${msg}`);
+  };
+  try {
+    log("--- Recalc start (現金流&防呆加強版) ---");
+
+    const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
+    const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
+    const [txSnap, splitSnap] = await Promise.all([
+      db.collection(`users/${uid}/transactions`).get(),
+      db.collection(`users/${uid}/splits`).get()
+    ]);
+    const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    if (txs.length === 0) {
+      await Promise.all([
+        holdingsRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
+        histRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+      ]);
+      log("no tx, cleared");
+      return;
+    }
+
+    const market = await getMarketDataFromDb(txs, log);
+    const result = calculatePortfolio(txs, splits, market, log);
+    const {
+      holdings,
+      totalRealizedPL,
+      portfolioHistory,
+      xirr,
+      overallReturnRateTotal,
+      overallReturnRate
+    } = result;
+
+    const data = {
+      holdings,
+      totalRealizedPL,
+      xirr,
+      overallReturnRateTotal,
+      overallReturnRate,
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+      force_recalc_timestamp: admin.firestore.FieldValue.delete()
+    };
+    await Promise.all([
+      holdingsRef.set(data, { merge: true }),
+      histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+    ]);
+    log("--- Recalc done ---");
+  } catch (e) {
+    console.error(`[${uid}]`, e);
+    logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
+  } finally {
+    await logRef.set({ entries: logs });
+  }
+}
+
+/* ================================================================
+ * Triggers
+ * ================================================================ */
 exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
   .onWrite((chg, ctx) => {
