@@ -326,7 +326,7 @@
 
     async function handleRegister(auth) { const email = document.getElementById('email').value; const password = document.getElementById('password').value; if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; } try { await createUserWithEmailAndPassword(auth, email, password); showNotification('success', '註冊成功！已自動登入。'); } catch (error) { console.error("註冊失敗:", error); showNotification('error', `註冊失敗: ${error.message}`); } }
     async function handleLogin(auth) { const email = document.getElementById('email').value; const password = document.getElementById('password').value; if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; } try { await signInWithEmailAndPassword(auth, email, password); showNotification('success', '登入成功！'); } catch (error) { console.error("登入失敗:", error); showNotification('error', `登入失敗: ${error.message}`); } }
-    async function handleLogout(auth) { try { await signOut(auth); showNotification('info', '您已成功登出。'); } catch (error) { console.error("登入失敗:", error); showNotification('error', `登入失敗: ${error.message}`); } }
+    async function handleLogout(auth) { try { await signOut(auth); showNotification('info', '您已成功登出。'); } catch (error) { console.error("登出失敗:", error); showNotification('error', `登出失敗: ${error.message}`); } }
     
     function toggleOptionalFields() {
         const currency = document.getElementById('currency').value;
