@@ -343,21 +343,25 @@
             renderAll();
         }, (error) => console.error("讀取拆股事件失敗:", error));
         
+        // index.html - 確認 onSnapshot 監聽器的內容
         const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
         holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
             if (docSnap.exists()) {
                 const data = docSnap.data();
+                // 更新全域變數 (這一步仍然需要，因為 renderHoldingsTable 依賴它)
                 holdings = data.holdings || {};
                 realizedPLFromBackend = data.totalRealizedPL || 0;
                 overallReturnRateFromBackend = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
                 xirrFromBackend = data.xirr || 0;
             } else {
+                // 清空全域變數
                 holdings = {};
                 realizedPLFromBackend = 0;
                 overallReturnRateFromBackend = 0;
                 xirrFromBackend = 0;
             }
             dataLoaded.holdings = true;
+            // 呼叫 renderAll，它會用最新的全域變數去渲染畫面
             renderAll();
         }, (error) => console.error("讀取持股資料失敗:", error));
 
@@ -371,14 +375,17 @@
         }, (error) => console.error("讀取資產歷史失敗:", error));
     }
 
+    // 將函式簽名從 async function renderAll() 改為：
     async function renderAll() {
         if (!dataLoaded.transactions || !dataLoaded.holdings || !dataLoaded.splits) return;
-        
-        renderHoldingsTable();
+    
+        renderHoldingsTable(); // 這個函式直接使用全域 holdings，我們先保持不動
         renderTransactionsTable();
         renderSplitsTable();
-        updateDashboard();
-
+    
+        // 將全域變數作為參數傳遞給 updateDashboard
+        updateDashboard(holdings, realizedPLFromBackend, overallReturnRateFromBackend, xirrFromBackend);
+    
         const loadingOverlay = document.getElementById('loading-overlay');
         if (loadingOverlay.style.display !== 'none') {
             loadingOverlay.style.display = 'none';
@@ -487,30 +494,32 @@
         document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit));
     }
 
-    function updateDashboard() {
-        const holdingsArray = Object.values(holdings);
+    // 將函式簽名從 function updateDashboard() 改為：
+    function updateDashboard(currentHoldings, currentRealizedPL, currentOverallReturn, currentXIRR) {
+        // 將函式內部的計算基礎從全域變數改為傳入的參數
+        const holdingsArray = Object.values(currentHoldings); // 使用參數 currentHoldings
         const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
         const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
-        
-        const totalReturnOnInvestment = overallReturnRateFromBackend;
-        
+    
+        const totalReturnOnInvestment = currentOverallReturn; // 使用參數 currentOverallReturn
+    
         document.getElementById('total-assets').textContent = formatNumber(totalMarketValue, 0);
-        
+    
         const unrealizedEl = document.getElementById('unrealized-pl');
         unrealizedEl.textContent = formatNumber(totalUnrealizedPL, 0);
         unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
-        
+    
         const realizedEl = document.getElementById('realized-pl');
-        realizedEl.textContent = formatNumber(realizedPLFromBackend, 0);
-        realizedEl.className = `text-3xl font-bold mt-2 ${realizedPLFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
-
+        realizedEl.textContent = formatNumber(currentRealizedPL, 0); // 使用參數 currentRealizedPL
+        realizedEl.className = `text-3xl font-bold mt-2 ${currentRealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
+    
         const totalReturnEl = document.getElementById('total-return');
         totalReturnEl.textContent = `${totalReturnOnInvestment.toFixed(2)}%`;
         totalReturnEl.className = `text-3xl font-bold mt-2 ${totalReturnOnInvestment >= 0 ? 'text-red-600' : 'text-green-600'}`;
-        
+    
         const xirrEl = document.getElementById('xirr-value');
-        xirrEl.textContent = `${(xirrFromBackend * 100).toFixed(2)}%`;
-        xirrEl.className = `text-3xl font-bold mt-2 ${xirrFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
+        xirrEl.textContent = `${(currentXIRR * 100).toFixed(2)}%`; // 使用參數 currentXIRR
+        xirrEl.className = `text-3xl font-bold mt-2 ${currentXIRR >= 0 ? 'text-red-600' : 'text-green-600'}`;
     }
 
     function initializeChart() {
