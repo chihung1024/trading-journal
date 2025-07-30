@@ -99,6 +99,7 @@
 
             <!-- Asset Growth Chart -->
             <div class="card p-6"><h3 class="text-lg font-semibold text-gray-800 mb-4">資產成長曲線 (TWD)</h3><div id="asset-chart"></div></div>
+            <div class="card p-6 mt-8"><h3 class="text-lg font-semibold text-gray-800 mb-4">時間加權報酬走勢圖 (%)</h3><div id="twr-chart"></div></div>
         </main>
 
         <!-- Modals -->
@@ -142,6 +143,7 @@
     let userSplits = [];
     let holdings = {};
     let chart;
+    let twrChart;
     let userId;
     let realizedPLFromBackend = 0;
     let overallReturnRateFromBackend = 0;
@@ -174,6 +176,7 @@
             db = getFirestore(app);
             setupEventListeners();
             initializeChart();
+            initializeTwrChart();
             lucide.createIcons();
             handleAuthentication(); // 處理驗證流程
         } catch (error) {
@@ -362,11 +365,20 @@
         }, (error) => console.error("讀取持股資料失敗:", error));
 
         const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
+        
+        // 在 setupDataListeners 函式中找到並替換這段
+        const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
         historyUnsubscribe = onSnapshot(historyDocRef, (docSnap) => {
+            // [修改] 以下是新的處理邏輯
             if (docSnap.exists()) {
-                updateAssetChart(docSnap.data().history);
+                const historyData = docSnap.data().history;
+                // 分別更新兩張圖表
+                updateAssetChart(historyData);
+                updateTwrChart(historyData);
             } else {
-                 updateAssetChart({}); // 清空圖表
+                // 如果沒有歷史紀錄，清空兩張圖表
+                updateAssetChart({});
+                updateTwrChart({});
             }
         }, (error) => console.error("讀取資產歷史失敗:", error));
     }
@@ -519,15 +531,57 @@
         chart.render();
     }
 
+    // [新增] 初始化 TWR 圖表的函式
+    function initializeTwrChart() {
+        const options = {
+            chart: { type: 'area', height: 350, zoom: { enabled: true }, toolbar: { show: true } },
+            series: [{ name: '時間加權報酬', data: [] }],
+            xaxis: { type: 'datetime', labels: { datetimeUTC: false, format: 'yy/MM/dd' } },
+            yaxis: {
+                labels: {
+                    formatter: (value) => { return value.toFixed(2) + '%' } // 格式化為百分比
+                }
+            },
+            dataLabels: { enabled: false },
+            stroke: { curve: 'smooth', width: 2 },
+            fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.7, opacityTo: 0.3, stops: [0, 90, 100] } },
+            tooltip: {
+                x: { format: 'yyyy/MM/dd' },
+                y: {
+                    formatter: (value) => { return value.toFixed(2) + '%' } // 格式化為百分比
+                }
+            },
+            colors: ['#059669'] // 使用綠色系
+        };
+        twrChart = new ApexCharts(document.querySelector("#twr-chart"), options);
+        twrChart.render();
+    }
+
+    // [修改] 更新 updateAssetChart 來讀取新的資料結構
     function updateAssetChart(portfolioHistory) {
-        if (!portfolioHistory || Object.keys(portfolioHistory).length === 0) {
-            chart.updateSeries([{ data: [] }]);
+        if (!chart || !portfolioHistory || Object.keys(portfolioHistory).length === 0) {
+            if(chart) chart.updateSeries([{ data: [] }]);
             return;
         }
+        // 從物件中提取 marketValue
         const chartData = Object.entries(portfolioHistory)
             .sort((a, b) => new Date(a[0]) - new Date(b[0]))
-            .map(([date, value]) => [new Date(date).getTime(), value]);
+            .map(([date, value]) => [new Date(date).getTime(), value.marketValue]); // 修改點
         chart.updateSeries([{ data: chartData }]);
+    }
+
+    // [新增] 更新 TWR 圖表的函式
+    function updateTwrChart(portfolioHistory) {
+        if (!twrChart || !portfolioHistory || Object.keys(portfolioHistory).length === 0) {
+            if(twrChart) twrChart.updateSeries([{ data: [] }]);
+            return;
+        }
+        // 將 TWR 指數轉換為百分比 (TWR Index - 1) * 100
+        const chartData = Object.entries(portfolioHistory)
+            .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+            .map(([date, value]) => [new Date(date).getTime(), ((value.twr || 1) - 1) * 100]);
+    
+        twrChart.updateSeries([{ data: chartData }]);
     }
     
     // --- 匯率快取 & 表單處理 ---
