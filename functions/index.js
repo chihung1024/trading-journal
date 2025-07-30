@@ -47,12 +47,26 @@ async function performRecalculation(uid) {
     const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
+    // [修正] 當沒有交易時，執行此區塊
     if (txs.length === 0) {
       await Promise.all([
-        holdingsRef.set({ holdings: {}, totalRealizedPL: 0, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }),
-        histRef.set({ history: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
+        // [修正] 使用 .set 搭配 { merge: true } 並明確刪除觸發欄位，以避免二次觸發
+        holdingsRef.set({
+          holdings: {},
+          totalRealizedPL: 0,
+          xirr: null, // 同步清除其他計算欄位
+          overallReturnRateTotal: 0,
+          overallReturnRate: 0,
+          lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+          force_recalc_timestamp: admin.firestore.FieldValue.delete() // <--- 關鍵修正
+        }, { merge: true }), // <--- 關鍵修正
+        histRef.set({
+          history: {},
+          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        })
       ]);
       log("no tx, cleared");
+      // 注意：這裡的 return 會結束函式，下方的程式碼不會執行
       return;
     }
 
