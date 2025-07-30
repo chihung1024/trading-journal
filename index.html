@@ -123,7 +123,7 @@
         let userId;
         let realizedPLFromBackend = 0;
         let overallReturnRateFromBackend = 0;
-
+        let xirrFromBackend = 0;
         
         let transactionsUnsubscribe = null;
         let splitsUnsubscribe = null;
@@ -229,24 +229,25 @@
                 renderAll();
             }, (error) => console.error("讀取拆股事件失敗:", error));
             
-            const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
-            holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    holdings = data.holdings || {};
-                    realizedPLFromBackend = data.totalRealizedPL || 0;
-                    overallReturnRateFromBackend = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
-                    const xirr = data.xirr || 0;
-                    const xirrEl = document.getElementById('xirr-value');
-                    xirrEl.textContent = `${(xirr * 100).toFixed(2)}%`;
-                    xirrEl.className = `text-3xl font-bold mt-2 ${xirr >= 0 ? 'text-red-600' : 'text-green-600'}`;
-                } else {
-                    holdings = {};
-                    realizedPLFromBackend = 0;
-                }
-                dataLoaded.holdings = true;
-                renderAll();
-            }, (error) => console.error("讀取持股資料失敗:", error));
+// 監聽 holdings 文件的變化
+            const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
+            holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    holdings = data.holdings || {};
+                    realizedPLFromBackend = data.totalRealizedPL || 0;
+                    overallReturnRateFromBackend = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
+                    // [修改] 只更新 xirrFromBackend 變數，不操作畫面
+                    xirrFromBackend = data.xirr || 0;
+                } else {
+                    holdings = {};
+                    realizedPLFromBackend = 0;
+                    // 如果文件不存在，也重設 XIRR
+                    xirrFromBackend = 0;
+                }
+                dataLoaded.holdings = true;
+                renderAll();
+            }, (error) => console.error("讀取持股資料失敗:", error));
 
             const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
             historyUnsubscribe = onSnapshot(historyDocRef, (docSnap) => {
@@ -370,30 +371,33 @@
             document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit));
         }
 
-        function updateDashboard() {
-            const holdingsArray = Object.values(holdings);
-            const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
-            const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
-            const totalCost = holdingsArray.reduce((sum, h) => sum + h.totalCostTWD, 0);
+function updateDashboard() {
+            const holdingsArray = Object.values(holdings);
+            const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
+            const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
+            const totalCost = holdingsArray.reduce((sum, h) => sum + h.totalCostTWD, 0);
 
-            const totalReturnOnInvestment = overallReturnRateFromBackend;
-            
-            document.getElementById('total-assets').textContent = formatNumber(totalMarketValue, 0);
-            
-            const unrealizedEl = document.getElementById('unrealized-pl');
-            unrealizedEl.textContent = formatNumber(totalUnrealizedPL, 0);
-            unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
-            
-            const realizedEl = document.getElementById('realized-pl');
-            realizedEl.textContent = formatNumber(realizedPLFromBackend, 0);
-            realizedEl.className = `text-3xl font-bold mt-2 ${realizedPLFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
+            const totalReturnOnInvestment = overallReturnRateFromBackend;
+            
+            document.getElementById('total-assets').textContent = formatNumber(totalMarketValue, 0);
+            
+            const unrealizedEl = document.getElementById('unrealized-pl');
+            unrealizedEl.textContent = formatNumber(totalUnrealizedPL, 0);
+            unrealizedEl.className = `text-3xl font-bold mt-2 ${totalUnrealizedPL >= 0 ? 'text-red-600' : 'text-green-600'}`;
+            
+            const realizedEl = document.getElementById('realized-pl');
+            realizedEl.textContent = formatNumber(realizedPLFromBackend, 0);
+            realizedEl.className = `text-3xl font-bold mt-2 ${realizedPLFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
 
-            const totalReturnEl = document.getElementById('total-return');
-            totalReturnEl.textContent = `${totalReturnOnInvestment.toFixed(2)}%`;
-            totalReturnEl.className = `text-3xl font-bold mt-2 ${totalReturnOnInvestment >= 0 ? 'text-red-600' : 'text-green-600'}`;
-            
-            document.getElementById('xirr-value').textContent = 'N/A';
-        }
+            const totalReturnEl = document.getElementById('total-return');
+            totalReturnEl.textContent = `${totalReturnOnInvestment.toFixed(2)}%`;
+            totalReturnEl.className = `text-3xl font-bold mt-2 ${totalReturnOnInvestment >= 0 ? 'text-red-600' : 'text-green-600'}`;
+            
+            // [修改] 從全域變數讀取 XIRR 並更新畫面
+            const xirrEl = document.getElementById('xirr-value');
+            xirrEl.textContent = `${(xirrFromBackend * 100).toFixed(2)}%`;
+            xirrEl.className = `text-3xl font-bold mt-2 ${xirrFromBackend >= 0 ? 'text-red-600' : 'text-green-600'}`;
+        }
         
         function initializeChart() {
             const options = { chart: { type: 'area', height: 350, zoom: { enabled: true }, toolbar: { show: true } }, series: [{ name: '總資產', data: [] }], xaxis: { type: 'datetime', labels: { datetimeUTC: false, format: 'yy/MM/dd' } }, yaxis: { labels: { formatter: (value) => { return formatNumber(value, 0) } } }, dataLabels: { enabled: false }, stroke: { curve: 'smooth', width: 2 }, fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.7, opacityTo: 0.3, stops: [0, 90, 100] } }, tooltip: { x: { format: 'yyyy/MM/dd' }, y: { formatter: (value) => { return formatNumber(value) } } }, colors: ['#4f46e5'] };
