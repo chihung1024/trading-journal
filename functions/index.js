@@ -377,19 +377,60 @@ function calculateFinalHoldings(pf, market) {
   return out;
 }
 
+// [修改] calculatePortfolioHistory 函式，加入 TWR 計算
 function calculatePortfolioHistory(evts, market) {
   const txEvts = evts.filter(e => e.eventType === "transaction");
   if (txEvts.length === 0) return {};
-  const first = new Date(txEvts[0].date), today = new Date();
-  let cur = new Date(first); cur.setUTCHours(0, 0, 0, 0);
-  const hist = {};
-  while (cur <= today) {
-    const key = cur.toISOString().split("T")[0];
-    const state = getPortfolioStateOnDate(evts, cur);
-    hist[key] = dailyValue(state, market, cur);
-    cur.setDate(cur.getDate() + 1);
+
+  const firstDate = new Date(txEvts[0].date);
+  const today = new Date();
+  let currentDate = new Date(firstDate);
+  currentDate.setUTCHours(0, 0, 0, 0);
+
+  const history = {};
+  let previousDayValue = 0;
+  // TWR 指數從 1 開始
+  let twrIndex = 1;
+
+  while (currentDate <= today) {
+    const dateKey = currentDate.toISOString().split("T")[0];
+
+    // 1. 計算當日現金流 (買入為正，賣出為負)
+    const cashFlowToday = txEvts
+      .filter(t => toDate(t.date).toISOString().split("T")[0] === dateKey)
+      .reduce((sum, t) => {
+        const fx = findFxRate(market, t.currency, t.date);
+        const amountTWD = getTotalCost(t) * (t.currency === "TWD" ? 1 : fx);
+        return sum + (t.type === "buy" ? amountTWD : -amountTWD);
+      }, 0);
+
+    // 2. 取得當日結束時的投資組合狀態與市值
+    const portfolioState = getPortfolioStateOnDate(evts, currentDate);
+    const endOfDayValue = dailyValue(portfolioState, market, currentDate);
+
+    // 3. 計算當日的時間加權報酬率
+    // 只有在期初價值不為零時才計算，避免除以零
+    if (previousDayValue > 0) {
+      // 當日報酬率 = 當日結束價值 / (前一日結束價值 + 當日現金流)
+      // 如果分母為 0 或負數，則當日報酬率視為 1 (無變化)
+      const denominator = previousDayValue + cashFlowToday;
+      if (denominator > 0) {
+        const dailyReturnFactor = endOfDayValue / denominator;
+        twrIndex = twrIndex * dailyReturnFactor;
+      }
+    }
+    
+    // 4. 儲存當日歷史數據
+    history[dateKey] = {
+      marketValue: endOfDayValue,
+      twr: twrIndex // 儲存 TWR 指數
+    };
+    
+    // 5. 更新前一日價值，為下一天計算做準備
+    previousDayValue = endOfDayValue;
+    currentDate.setDate(currentDate.getDate() + 1);
   }
-  return hist;
+  return history;
 }
 
 function createCashflows(evts, pf, holdings, market, firstBuyDateMap) {
