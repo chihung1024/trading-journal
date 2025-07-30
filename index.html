@@ -329,40 +329,67 @@
 
         const transactionsCol = collection(db, 'users', userId, 'transactions');
         const tq = query(transactionsCol, orderBy("date", "asc"));
+        
         transactionsUnsubscribe = onSnapshot(tq, (snapshot) => {
             transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             dataLoaded.transactions = true;
-            updateExchangeRateCache().then(() => renderAll());
+            // [關鍵修正] 不再呼叫 renderAll()，只呼叫自己的渲染函式
+            updateExchangeRateCache().then(() => renderTransactionsTable());
         }, (error) => console.error("讀取交易紀錄失敗:", error));
 
         const splitsCol = collection(db, 'users', userId, 'splits');
         const sq = query(splitsCol, orderBy("date", "asc"));
+        
         splitsUnsubscribe = onSnapshot(sq, (snapshot) => {
             userSplits = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             dataLoaded.splits = true;
-            renderAll();
+            // [關鍵修正] 不再呼叫 renderAll()，只呼叫自己的渲染函式
+            renderSplitsTable();
         }, (error) => console.error("讀取拆股事件失敗:", error));
         
         // index.html - 確認 onSnapshot 監聽器的內容
         const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
         holdingsUnsubscribe = onSnapshot(holdingsDocRef, (docSnap) => {
+            let currentHoldings = {};
+            let currentRealizedPL = 0;
+            let currentOverallReturn = 0;
+            let currentXIRR = 0;
+        
             if (docSnap.exists()) {
                 const data = docSnap.data();
-                // 更新全域變數 (這一步仍然需要，因為 renderHoldingsTable 依賴它)
-                holdings = data.holdings || {};
-                realizedPLFromBackend = data.totalRealizedPL || 0;
-                overallReturnRateFromBackend = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
-                xirrFromBackend = data.xirr || 0;
+                // 直接將新資料賦值給局部變數
+                currentHoldings = data.holdings || {};
+                currentRealizedPL = data.totalRealizedPL || 0;
+                currentOverallReturn = data.overallReturnRateTotal ?? data.overallReturnRate ?? 0;
+                currentXIRR = data.xirr || 0;
+        
+                // 同時更新全域變數，供其他地方使用 (例如 renderAll 首次載入時)
+                holdings = currentHoldings;
+                realizedPLFromBackend = currentRealizedPL;
+                overallReturnRateFromBackend = currentOverallReturn;
+                xirrFromBackend = currentXIRR;
+        
             } else {
-                // 清空全域變數
+                // 如果文件不存在，也更新全域變數
                 holdings = {};
                 realizedPLFromBackend = 0;
                 overallReturnRateFromBackend = 0;
                 xirrFromBackend = 0;
             }
             dataLoaded.holdings = true;
-            // 呼叫 renderAll，它會用最新的全域變數去渲染畫面
-            renderAll();
+        
+            // [關鍵修正] 不再呼叫 renderAll()，而是精準地呼叫需要更新的函式
+            // 並將最新的資料作為參數傳遞 (這也是上次的建議，但這次是在正確的時機呼叫)
+            renderHoldingsTable(currentHoldings);
+            updateDashboard(currentHoldings, currentRealizedPL, currentOverallReturn, currentXIRR);
+        
+            // 首次載入時，檢查是否所有資料都已到位，並隱藏讀取動畫
+            const loadingOverlay = document.getElementById('loading-overlay');
+            if (loadingOverlay.style.display !== 'none' && dataLoaded.transactions && dataLoaded.splits) {
+                 loadingOverlay.style.display = 'none';
+                 showNotification('success', '雲端資料同步完成！');
+            }
+        
         }, (error) => console.error("讀取持股資料失敗:", error));
 
         const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
@@ -375,15 +402,13 @@
         }, (error) => console.error("讀取資產歷史失敗:", error));
     }
 
-    // 將函式簽名從 async function renderAll() 改為：
+        // 將函式簽名從 async function renderAll() 改為：
     async function renderAll() {
         if (!dataLoaded.transactions || !dataLoaded.holdings || !dataLoaded.splits) return;
     
-        renderHoldingsTable(); // 這個函式直接使用全域 holdings，我們先保持不動
+        renderHoldingsTable(holdings); // 傳入全域變數
         renderTransactionsTable();
         renderSplitsTable();
-    
-        // 將全域變數作為參數傳遞給 updateDashboard
         updateDashboard(holdings, realizedPLFromBackend, overallReturnRateFromBackend, xirrFromBackend);
     
         const loadingOverlay = document.getElementById('loading-overlay');
@@ -396,10 +421,10 @@
     // --- 核心渲染 ---
     // (此處 renderHoldingsTable, renderTransactionsTable, renderSplitsTable, updateDashboard, initializeChart, updateAssetChart 等函式無需修改)
     // ... 將您原本的這些函式複製到這裡 ...
-    function renderHoldingsTable() {
+    function renderHoldingsTable(currentHoldings) {
         const tableBody = document.getElementById('holdings-table-body');
         tableBody.innerHTML = '';
-        const holdingsArray = Object.values(holdings);
+        const holdingsArray = Object.values(currentHoldings);
 
         if (holdingsArray.length === 0) {
             tableBody.innerHTML = `<tr><td colspan="8" class="text-center py-10 text-gray-500">沒有持股紀錄，請新增一筆交易。</td></tr>`;
@@ -494,10 +519,9 @@
         document.querySelectorAll('.delete-split-btn').forEach(btn => btn.addEventListener('click', handleDeleteSplit));
     }
 
-    // 將函式簽名從 function updateDashboard() 改為：
+        // 將函式簽名從 function updateDashboard() 改為：
     function updateDashboard(currentHoldings, currentRealizedPL, currentOverallReturn, currentXIRR) {
-        // 將函式內部的計算基礎從全域變數改為傳入的參數
-        const holdingsArray = Object.values(currentHoldings); // 使用參數 currentHoldings
+        const holdingsArray = Object.values(currentHoldings); // <--- 使用參數
         const totalMarketValue = holdingsArray.reduce((sum, h) => sum + h.marketValueTWD, 0);
         const totalUnrealizedPL = holdingsArray.reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
     
