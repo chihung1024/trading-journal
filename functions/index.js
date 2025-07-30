@@ -43,15 +43,13 @@ async function performRecalculation(uid) {
       return;
     }
     
-    // [新增] 將 benchmark symbol 加入到需要抓取市場數據的列表
     const allSymbolsInPortfolio = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
     const symbolsToFetch = [...new Set([...allSymbolsInPortfolio, benchmarkSymbol.toUpperCase()])];
-    const tempTxsForMarketData = symbolsToFetch.map(s => ({ symbol: s, currency: 'USD'})); // 假設 benchmark 皆為 USD
+    const tempTxsForMarketData = symbolsToFetch.map(s => ({ symbol: s, currency: 'USD'}));
     const market = await getMarketDataFromDb(tempTxsForMarketData, log);
 
     const result = calculatePortfolio(txs, splits, market, log);
     
-    // [新增] 計算 benchmark 歷史報酬
     const benchmarkHistory = calculateBenchmarkHistory(
         benchmarkSymbol,
         new Date(result.portfolioHistory.startDate),
@@ -62,7 +60,6 @@ async function performRecalculation(uid) {
 
     await holdingsRef.set({ ...result.holdingsData, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), force_recalc_timestamp: admin.firestore.FieldValue.delete() }, { merge: true });
     
-    // [修改] 將 portfolio 歷史和 benchmark 歷史一起儲存
     await histRef.set({ 
         history: result.portfolioHistory.data, 
         benchmark: {
@@ -82,9 +79,9 @@ async function performRecalculation(uid) {
 }
 
 /* ================================================================
- * Triggers & Market Data Helpers (此處程式碼與前版相同，保持不變)
+ * Triggers & Market Data Helpers
  * ================================================================ */
-exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" }).firestore.document("users/{uid}/user_data/current_holdings").onWrite((chg, ctx) => { if (chg.before.exists && !chg.after.exists) { console.log(`[${ctx.params.uid}] Doc deleted. Halting.`); return null; } const beforeData = chg.before.data(); const afterData = chg.after.data(); if (!beforeData || (afterData.force_recalc_timestamp !== beforeData.force_recalc_timestamp)) { console.log(`[${ctx.params.uid}] Triggering recalc.`); return performRecalculation(ctx.params.uid); } console.log(`[${ctx.params.uid}] No action needed.`); return null; });
+exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" }).firestore.document("users/{uid}/user_data/current_holdings").onWrite((chg, ctx) => { if (chg.before.exists && !chg.after.exists) { return null; } const beforeData = chg.before.data(); const afterData = chg.after.data(); if (!beforeData || (afterData.force_recalc_timestamp !== beforeData.force_recalc_timestamp)) { return performRecalculation(ctx.params.uid); } return null; });
 exports.recalculateOnTransaction = functions.firestore.document("users/{uid}/transactions/{txId}").onWrite((_, ctx) => db.doc(`users/${ctx.params.uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
 exports.recalculateOnSplit = functions.firestore.document("users/{uid}/splits/{splitId}").onWrite((_, ctx) => db.doc(`users/${ctx.params.uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
 exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" }).firestore.document("price_history/{symbol}").onWrite(async (chg, ctx) => { const s = ctx.params.symbol.toUpperCase(); const before = chg.before.exists ? chg.before.data() : null; const after = chg.after.data(); if (before && JSON.stringify(before.prices) === JSON.stringify(after.prices) && JSON.stringify(before.dividends) === JSON.stringify(after.dividends)) return null; const txSnap = await db.collectionGroup("transactions").where("symbol", "==", s).get(); if (txSnap.empty) return null; const users = new Set(txSnap.docs.map(d => d.ref.path.split("/")[1]).filter(uid => typeof uid === "string" && uid.length > 0)); const ts = admin.firestore.FieldValue.serverTimestamp(); await Promise.all([...users].map(async uid => { try { await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true }); } catch (e) { console.error(`Error for user ${uid}:`, e); } })); return null; });
@@ -96,8 +93,6 @@ async function fetchAndSaveMarketData(symbol, log) { try { const hist = await ya
  * Portfolio calculation
  * ================================================================ */
 function calculatePortfolio(txs, splits, market, log) {
-  // ... 此函式內容與前一版 (配息稅版本) 相同 ...
-  // 但我們將 portfolioHistory 的計算結果結構稍微改變
   const firstBuyDateMap = {}; txs.forEach(tx => { if (tx.type === "buy") { const sym = tx.symbol.toUpperCase(); const d = toDate(tx.date); if (!firstBuyDateMap[sym] || d < firstBuyDateMap[sym]) firstBuyDateMap[sym] = d; } });
   const evts = [ ...txs.map(t => ({ ...t, date: toDate(t.date), eventType: "transaction" })), ...splits.map(s => ({ ...s, date: toDate(s.date), eventType: "split" })) ]; [...new Set(txs.map(t => t.symbol.toUpperCase()))].forEach(sym => { Object.entries(market[sym]?.dividends || {}).forEach(([d, amt]) => { if (firstBuyDateMap[sym] && new Date(d) >= firstBuyDateMap[sym]) evts.push({ date: new Date(d), symbol: sym, amount: amt, eventType: "dividend" }); }); }); evts.sort((a, b) => new Date(a.date) - new Date(b.date));
   const pf = {}; let totalRealizedPL = 0;
@@ -124,8 +119,6 @@ function calculatePortfolio(txs, splits, market, log) {
  * History Calculation
  * ================================================================ */
 function calculatePortfolioHistory(evts, market) {
-  // ... 此函式內容與前一版 (TWR分割修正) 相同 ...
-  // 但我們回傳包含 data 和 startDate 的物件
   const txEvts = evts.filter(e => e.eventType === "transaction"); if (txEvts.length === 0) return { data: {}, startDate: new Date().toISOString() };
   const firstDate = new Date(txEvts[0].date); const today = new Date(); let currentDate = new Date(firstDate); currentDate.setUTCHours(0, 0, 0, 0);
   const history = {}; let previousDayValue = 0; let twrIndex = 1; const allSplits = evts.filter(e => e.eventType === 'split');
@@ -143,7 +136,6 @@ function calculatePortfolioHistory(evts, market) {
 }
 
 function dailyValue(state, market, date, allSplits) {
-  // ... 此函式內容與前一版 (TWR分割修正) 相同 ...
   let totalValue = 0;
   for (const sym in state) {
     const s = state[sym]; const qty = s.lots.reduce((sum, l) => sum + l.quantity, 0); if (qty === 0) continue;
@@ -156,54 +148,37 @@ function dailyValue(state, market, date, allSplits) {
   return totalValue;
 }
 
-/*
- * [新增] 計算 Benchmark 歷史報酬的函式
- */
 function calculateBenchmarkHistory(benchmarkSymbol, startDate, endDate, marketData, allSplits) {
     if (!marketData || !marketData.prices) return {};
-
     const prices = marketData.prices || {};
     const dividends = marketData.dividends || {};
     const benchmarkSplits = allSplits.filter(s => s.symbol.toUpperCase() === benchmarkSymbol.toUpperCase());
-
     const history = {};
     let currentIndex = 1;
     let yesterdayPriceUnadjusted = null;
     let currentDate = new Date(startDate);
-
     while (currentDate <= endDate) {
         const dateKey = currentDate.toISOString().split("T")[0];
         const priceAdjusted = findNearest(prices, currentDate);
-
         if (priceAdjusted === undefined) {
-            if (Object.keys(history).length > 0) {
-                history[dateKey] = currentIndex;
-            }
+            if (Object.keys(history).length > 0) { history[dateKey] = currentIndex; }
             currentDate.setDate(currentDate.getDate() + 1);
             continue;
         }
-
         let priceUnadjusted = priceAdjusted;
         const futureSplits = benchmarkSplits.filter(s => new Date(s.date) > currentDate);
-        for (const split of futureSplits) {
-            priceUnadjusted *= split.ratio;
-        }
-        
+        for (const split of futureSplits) { priceUnadjusted *= split.ratio; }
         const dividendToday = dividends[dateKey] || 0;
-
         if (yesterdayPriceUnadjusted !== null) {
             const dailyReturnFactor = (priceUnadjusted + dividendToday) / yesterdayPriceUnadjusted;
-            currentIndex *= dailyReturnFactor;
+            if (isFinite(dailyReturnFactor)) { currentIndex *= dailyReturnFactor; }
         }
-
         history[dateKey] = currentIndex;
         yesterdayPriceUnadjusted = priceUnadjusted;
-        
         currentDate.setDate(currentDate.getDate() + 1);
     }
     return history;
 }
-
 
 /* ================================================================
  * Helpers
