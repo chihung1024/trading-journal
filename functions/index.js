@@ -96,13 +96,36 @@ async function performRecalculation(uid) {
 /* ================================================================
  * Triggers
  * ================================================================ */
-exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
-  .firestore.document("users/{uid}/user_data/current_holdings")
-  .onWrite((chg, ctx) => { // <<< 修正點
-    const b = chg.before.data(), a = chg.after.data();
-    // 如果文件是新建的(before不存在)，或者時間戳有變動，則執行
-    if (!b || (a.force_recalc_timestamp && a.force_recalc_timestamp !== b.force_recalc_timestamp))
-      return performRecalculation(ctx.params.uid);
+exports.recalculatePortfolio = functions.runWith(...)
+  .firestore.document(...)
+  .onWrite((chg, ctx) => {
+    const beforeData = chg.before.data();
+    const afterData = chg.after.data();
+
+    // 情況一：文件被刪除，直接結束
+    if (beforeData && !afterData) {
+      console.log(`[${ctx.params.uid}] Document deleted. No action.`);
+      return null;
+    }
+
+    // 情況二：文件被建立，且帶有觸發器時間戳
+    if (!beforeData && afterData) {
+      if (afterData.force_recalc_timestamp) {
+        console.log(`[${ctx.params.uid}] Document created. Triggering recalculation.`);
+        return performRecalculation(ctx.params.uid);
+      }
+    }
+
+    // 情況三：文件被更新，且觸發器時間戳發生變化
+    if (beforeData && afterData) {
+      if (afterData.force_recalc_timestamp !== beforeData.force_recalc_timestamp) {
+        console.log(`[${ctx.params.uid}] Timestamp updated. Triggering recalculation.`);
+        return performRecalculation(ctx.params.uid);
+      }
+    }
+    
+    // 其他所有情況 (例如：更新了其他欄位但時間戳不變)，不執行任何操作
+    console.log(`[${ctx.params.uid}] Write event did not meet trigger conditions. No action.`);
     return null;
   });
 
