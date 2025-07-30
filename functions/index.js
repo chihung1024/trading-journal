@@ -98,9 +98,10 @@ async function performRecalculation(uid) {
  * ================================================================ */
 exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
-  .onUpdate((chg, ctx) => {
+  .onWrite((chg, ctx) => { // <<< 修正點
     const b = chg.before.data(), a = chg.after.data();
-    if (a.force_recalc_timestamp && a.force_recalc_timestamp !== b.force_recalc_timestamp)
+    // 如果文件是新建的(before不存在)，或者時間戳有變動，則執行
+    if (!b || (a.force_recalc_timestamp && a.force_recalc_timestamp !== b.force_recalc_timestamp))
       return performRecalculation(ctx.params.uid);
     return null;
   });
