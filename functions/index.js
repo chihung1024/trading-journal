@@ -32,28 +32,13 @@ async function performRecalculation(uid) {
     logs.push(`${ts}: ${msg}`);
     console.log(`[${uid}] ${ts}: ${msg}`);
   };
+
   try {
     log("--- Recalc start (現金流&防呆加強版) ---");
 
-  log(`[${uid}] 準備寫入 current_holdings...`);
-  await holdingsRef.set(data, { merge: true });
-  log(`[${uid}] current_holdings 寫入完成`);
-
-  log(`[${uid}] 準備寫入 portfolio_history...`);
-  await histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
-  log(`[${uid}] portfolio_history 寫入完成`);
-  log("--- Recalc done ---");
-
-} catch (e) {
-  console.error(`[${uid}] 發生錯誤:`, e);
-  logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
-} finally {
-  await logRef.set({ entries: logs });
-}
-
-
     const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
     const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
+
     const [txSnap, splitSnap] = await Promise.all([
       db.collection(`users/${uid}/transactions`).get(),
       db.collection(`users/${uid}/splits`).get()
@@ -90,18 +75,23 @@ async function performRecalculation(uid) {
       lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
       force_recalc_timestamp: admin.firestore.FieldValue.delete()
     };
-    await Promise.all([
-      holdingsRef.set(data, { merge: true }),
-      histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() })
-    ]);
+
+    log(`[${uid}] 準備寫入 current_holdings...`);
+    await holdingsRef.set(data, { merge: true });
+    log(`[${uid}] current_holdings 寫入完成`);
+
+    log(`[${uid}] 準備寫入 portfolio_history...`);
+    await histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
+    log(`[${uid}] portfolio_history 寫入完成`);
     log("--- Recalc done ---");
   } catch (e) {
-    console.error(`[${uid}]`, e);
+    console.error(`[${uid}] 發生錯誤:`, e);
     logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
   } finally {
     await logRef.set({ entries: logs });
   }
 }
+
 
 /* ================================================================
  * Triggers
