@@ -18,7 +18,6 @@ const currencyToFx = {
   USD: "TWD=X",
   HKD: "HKD=TWD",
   JPY: "JPY=TWD"
-  // TWD 省略
 };
 
 /* ================================================================
@@ -46,27 +45,32 @@ async function performRecalculation(uid) {
     const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
+    // --- Case: No transactions found ---
     if (txs.length === 0) {
-      await Promise.all([
-        // [最終修正] 移除 { merge: true }，改為完全覆寫
-        holdingsRef.set({
-          holdings: {},
-          totalRealizedPL: 0,
-          xirr: null,
-          overallReturnRateTotal: 0,
-          overallReturnRate: 0,
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-          force_recalc_timestamp: admin.firestore.FieldValue.delete()
-        }),
-        histRef.set({
-          history: {},
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-        })
-      ]);
+      // Step 1: Overwrite with empty data
+      await holdingsRef.set({
+        holdings: {},
+        totalRealizedPL: 0,
+        xirr: null,
+        overallReturnRateTotal: 0,
+        overallReturnRate: 0,
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      // Step 2: Update to delete the trigger field
+      await holdingsRef.update({
+        force_recalc_timestamp: admin.firestore.FieldValue.delete()
+      });
+
+      await histRef.set({
+        history: {},
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      });
+
       log("no tx, cleared");
       return;
     }
 
+    // --- Case: Transactions exist ---
     const market = await getMarketDataFromDb(txs, log);
     const result = calculatePortfolio(txs, splits, market, log);
     const {
@@ -78,18 +82,24 @@ async function performRecalculation(uid) {
       overallReturnRate
     } = result;
 
-    const data = {
+    const dataToWrite = {
       holdings,
       totalRealizedPL,
       xirr,
       overallReturnRateTotal,
       overallReturnRate,
       lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-      force_recalc_timestamp: admin.firestore.FieldValue.delete()
     };
-    
-    // [最終修正] 移除 { merge: true }，改為完全覆寫，確保舊的持股資料被清除
-    await holdingsRef.set(data);
+
+    // [最終修正] 分兩步操作來解決 API 規則衝突
+    // 步驟 1: 使用 set() 完全覆寫文件，確保舊持股被清除。dataToWrite 物件中不能包含 delete() 指令。
+    await holdingsRef.set(dataToWrite);
+
+    // 步驟 2: 使用 update() 來刪除觸發欄位，這符合 Firestore 的規定。
+    await holdingsRef.update({
+        force_recalc_timestamp: admin.firestore.FieldValue.delete()
+    });
+
     await histRef.set({ history: portfolioHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
     
     log("--- Recalc done ---");
@@ -102,7 +112,7 @@ async function performRecalculation(uid) {
 }
 
 /* ================================================================
- * Triggers
+ * Triggers (No changes below this line)
  * ================================================================ */
 exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
@@ -168,7 +178,6 @@ exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memo
     return null;
   });
 
-// [修正] 更新匯率時，只為有交易紀錄的使用者觸發重算，避免復活問題
 exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
   .firestore.document("exchange_rates/{fxSym}")
   .onWrite(async (chg, ctx) => {
@@ -209,7 +218,7 @@ exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory:
   });
 
 /* ================================================================
- * Market-data helpers
+ * Market-data helpers (No changes here)
  * ================================================================ */
 async function getMarketDataFromDb(txs, log) {
   const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
@@ -261,7 +270,7 @@ async function fetchAndSaveMarketData(symbol, log) {
 }
 
 /* ================================================================
- * Portfolio calculation
+ * Portfolio calculation (No changes here)
  * ================================================================ */
 function calculatePortfolio(txs, splits, market, log) {
   const firstBuyDateMap = {};
@@ -366,7 +375,7 @@ function calculatePortfolio(txs, splits, market, log) {
 }
 
 /* ================================================================
- * Helpers
+ * Helpers (No changes here)
  * ================================================================ */
 function calculateFinalHoldings(pf, market) {
   const out = {}, today = new Date();
@@ -529,7 +538,6 @@ function getPortfolioStateOnDate(allEvts, target) {
   return st;
 }
 
-/* ---------- 匯率／價格最近值 ---------- */
 function findNearest(hist, date, toleranceDays = 0) {
   if (!hist || Object.keys(hist).length === 0) return undefined;
   const keys = Object.keys(hist).sort();
