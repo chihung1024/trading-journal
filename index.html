@@ -64,8 +64,8 @@
         <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <div id="loading-overlay" class="fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-40">
                 <div class="flex flex-col items-center text-center p-4">
-                    <svg id="loading-spinner-icon" class="animate-spin h-10 w-10 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                    <p id="loading-text" class="mt-4 text-lg font-medium text-gray-700">正在從雲端同步資料...</p>
+                    <svg class="animate-spin h-10 w-10 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    <p class="mt-4 text-lg font-medium text-gray-700">正在從雲端同步資料...</p>
                 </div>
             </div>
 
@@ -200,7 +200,7 @@
             twrChart.render();
         }
 
-        // --- Authentication ---
+        // --- Authentication & User Handling ---
         function handleAuthentication() {
             onAuthStateChanged(auth, (user) => {
                 const loadingOverlay = document.getElementById('loading-overlay');
@@ -277,7 +277,7 @@
             }
         }
         
-        // --- Event Listeners ---
+        // --- Event Listeners Setup ---
         function setupEventListeners() {
             document.getElementById('add-transaction-btn').addEventListener('click', () => openModal());
             document.getElementById('cancel-btn').addEventListener('click', closeModal);
@@ -306,13 +306,13 @@
             if (!userId) return;
 
             showNotification('info', `正在更新 Benchmark 為 ${newBenchmark} 並觸發重算...`);
-            const holdingsDocRef = doc(db, 'users', userId, 'user_data', 'current_holdings');
+            const benchmarkControlRef = doc(db, 'users', userId, 'controls', 'benchmark_control');
             try {
-                await setDoc(holdingsDocRef, { 
-                    benchmarkSymbol: newBenchmark,
-                    force_recalc_timestamp: serverTimestamp()
-                }, { merge: true });
-                showNotification('success', 'Benchmark 更新請求已送出！');
+                await setDoc(benchmarkControlRef, { 
+                    symbol: newBenchmark,
+                    updatedAt: serverTimestamp()
+                });
+                showNotification('success', 'Benchmark 更新請求已送出！後端將在幾秒後開始處理。');
             } catch (error) {
                 console.error("更新 Benchmark 失敗:", error);
                 showNotification('error', `更新 Benchmark 失敗: ${error.message}`);
