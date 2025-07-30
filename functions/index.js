@@ -404,7 +404,7 @@ function createCashflows(evts,pf,holdings,market){
   }
   
   // --- 關鍵：依日期早→晚排序 ---
-  flows.sort((a, b) => new Date(a.date) - new Date(b.date));
+  //flows.sort((a, b) => new Date(a.date) - new Date(b.date));
 
   flows.sort((a,b)=> new Date(a.date)-new Date(b.date));
   console.table(flows.map(f=>({
