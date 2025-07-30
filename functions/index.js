@@ -96,8 +96,8 @@ async function performRecalculation(uid) {
 /* ================================================================
  * Triggers
  * ================================================================ */
-exports.recalculatePortfolio = functions.runWith(...)
-  .firestore.document(...)
+exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
+  .firestore.document("users/{uid}/user_data/current_holdings")
   .onWrite((chg, ctx) => {
     const beforeData = chg.before.data();
     const afterData = chg.after.data();
