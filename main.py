@@ -15,42 +15,48 @@ def initialize_firebase():
             service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
             cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
-        except Exception:
+            print("Firebase initialized successfully from environment variable.")
+        except Exception as e1:
             # 若失敗，則嘗試本地檔案，適用於本地端開發
-            print("Could not initialize from environment variable. Trying local file...")
-            cred = credentials.Certificate("serviceAccountKey.json") # 請確保本地有此檔案
-            firebase_admin.initialize_app(cred)
+            print(f"Could not initialize from environment variable ({e1}). Trying local file 'serviceAccountKey.json'...")
+            try:
+                cred = credentials.Certificate("serviceAccountKey.json") # 請確保本地有此檔案
+                firebase_admin.initialize_app(cred)
+                print("Firebase initialized successfully from local file.")
+            except Exception as e2:
+                print(f"FATAL: Firebase initialization failed from both sources. Error (local file): {e2}")
+                exit(1)
             
     return firestore.client()
 
 def get_all_symbols_to_update(db):
     all_symbols = set()
     
-    # 1. 從交易紀錄中獲取股票代碼
+    # 1. 從所有使用者的交易紀錄中獲取股票代碼
     try:
         transactions_group = db.collection_group("transactions")
         for trans_doc in transactions_group.stream():
             symbol = trans_doc.to_dict().get('symbol')
             if symbol:
                 all_symbols.add(symbol.upper())
+        print(f"Found {len(all_symbols)} symbols from transactions.")
     except Exception as e:
         print(f"Warning: Could not read transactions. Error: {e}")
         
-    # 2. 從使用者資料中獲取 Benchmark 代碼
+    # 2. 從所有使用者的 current_holdings 中獲取 Benchmark 代碼
     try:
-        users_collection = db.collection("users")
-        for user_doc in users_collection.stream():
-            user_data_ref = user_doc.reference.collection("user_data").document("current_holdings")
-            user_data = user_data_ref.get()
-            if user_data.exists:
-                benchmark = user_data.to_dict().get('benchmarkSymbol')
-                if benchmark:
-                    all_symbols.add(benchmark.upper())
+        holdings_group = db.collection_group("current_holdings")
+        for holding_doc in holdings_group.stream():
+            benchmark = holding_doc.to_dict().get('benchmarkSymbol')
+            if benchmark:
+                all_symbols.add(benchmark.upper())
+        print(f"Found symbols from benchmarks, total unique symbols now: {len(all_symbols)}.")
     except Exception as e:
         print(f"Warning: Could not read user benchmark symbols. Error: {e}")
 
-    print(f"Found {len(all_symbols)} unique symbols to update: {list(all_symbols)}")
-    return list(all_symbols)
+    final_list = list(filter(None, all_symbols))
+    print(f"Found {len(final_list)} unique symbols to update: {final_list}")
+    return final_list
 
 def fetch_and_update_market_data(db, symbols):
     # 將 TWD=X 匯率固定加入更新列表
@@ -67,11 +73,11 @@ def fetch_and_update_market_data(db, symbols):
                 print(f"Warning: No history found for {symbol}.")
                 continue
 
-            prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if not pd.isna(val)}
+            prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if pd.notna(val)}
             
-            # 獲取股利資訊
-            dividends_df = stock.dividends
-            dividends = {idx.strftime('%Y-%m-%d'): val for idx, val in dividends_df.items()} if not dividends_df.empty else {}
+            # yfinance v0.2.40+ 推薦使用 history 來獲取股利
+            dividends_df = hist['Dividends']
+            dividends = {idx.strftime('%Y-%m-%d'): val for idx, val in dividends_df.items() if val > 0}
 
             is_forex = "=" in symbol
             collection_name = "exchange_rates" if is_forex else "price_history"
@@ -81,14 +87,13 @@ def fetch_and_update_market_data(db, symbols):
                 "prices": prices,
                 "dividends": dividends,
                 "lastUpdated": datetime.now().isoformat(),
-                "dataSource": "yfinance-scheduled-update-v2"
+                "dataSource": "yfinance-scheduled-update-v3"
             }
             if is_forex:
                 payload["rates"] = payload.pop("prices")
                 del payload["dividends"]
 
-            # 我們不再從 yfinance 儲存拆股數據，因為我們使用手動輸入的拆股事件
-            payload["splits"] = {}
+            payload["splits"] = {} # 拆股由使用者手動輸入
 
             doc_ref.set(payload)
             print(f"Successfully wrote price/dividend data for {symbol} to Firestore.")
