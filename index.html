@@ -280,13 +280,23 @@
         const benchmark = historyDocData?.benchmark || {};
         const benchmarkSymbol = benchmark.symbol || '比較基準';
         const benchmarkHistory = benchmark.data || {};
+        
         if (chart) {
-            const assetData = Object.entries(portfolioHistory).map(([date, value]) => [new Date(date).getTime(), value.marketValue]);
+            const assetData = Object.entries(portfolioHistory)
+                .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+                .map(([date, value]) => [new Date(date).getTime(), value.marketValue]);
             chart.updateSeries([{ name: '總資產', data: assetData }]);
         }
+
         if (twrChart) {
-            const twrData = Object.entries(portfolioHistory).map(([date, value]) => [new Date(date).getTime(), ((value.twr || 1) - 1) * 100]);
-            const benchmarkData = Object.entries(benchmarkHistory).map(([date, value]) => [new Date(date).getTime(), ((value || 1) - 1) * 100]);
+            const twrData = Object.entries(portfolioHistory)
+                .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+                .map(([date, value]) => [new Date(date).getTime(), ((value.twr || 1) - 1) * 100]);
+            
+            const benchmarkData = Object.entries(benchmarkHistory)
+                .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+                .map(([date, value]) => [new Date(date).getTime(), ((value || 1) - 1) * 100]);
+
             twrChart.updateSeries([
                 { name: '時間加權報酬', data: twrData },
                 { name: `${benchmarkSymbol} (比較基準)`, data: benchmarkData }
@@ -316,9 +326,8 @@
 
     async function handleRegister(auth) { const email = document.getElementById('email').value; const password = document.getElementById('password').value; if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; } try { await createUserWithEmailAndPassword(auth, email, password); showNotification('success', '註冊成功！已自動登入。'); } catch (error) { console.error("註冊失敗:", error); showNotification('error', `註冊失敗: ${error.message}`); } }
     async function handleLogin(auth) { const email = document.getElementById('email').value; const password = document.getElementById('password').value; if (!email || !password) { showNotification('error', '請輸入電子郵件和密碼。'); return; } try { await signInWithEmailAndPassword(auth, email, password); showNotification('success', '登入成功！'); } catch (error) { console.error("登入失敗:", error); showNotification('error', `登入失敗: ${error.message}`); } }
-    async function handleLogout(auth) { try { await signOut(auth); showNotification('info', '您已成功登出。'); } catch (error) { console.error("登出失敗:", error); showNotification('error', `登出失敗: ${error.message}`); } }
+    async function handleLogout(auth) { try { await signOut(auth); showNotification('info', '您已成功登出。'); } catch (error) { console.error("登入失敗:", error); showNotification('error', `登入失敗: ${error.message}`); } }
     
-    // [修正] 補上遺漏的函式
     function toggleOptionalFields() {
         const currency = document.getElementById('currency').value;
         document.getElementById('exchange-rate-field').style.display = (currency === 'USD') ? 'block' : 'none';
@@ -345,8 +354,8 @@
         for (const t of [...transactions].reverse()) {
             const row = document.createElement('tr');
             row.className = "hover:bg-gray-50";
-            const typeText = { buy: '買入', sell: '賣出', dividend: '股息' }; // 修正：加入 dividend
-            const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' }; // 修正：加入 dividend
+            const typeText = { buy: '買入', sell: '賣出', dividend: '股息' };
+            const typeColor = { buy: 'text-red-500', sell: 'text-green-500', dividend: 'text-blue-500' };
             const transactionDate = t.date.toDate ? t.date.toDate().toISOString().split('T')[0] : t.date;
             const decimals = isTwStock(t.symbol) ? 0 : 2;
             row.innerHTML = `<td class="px-6 py-4 whitespace-nowrap">${transactionDate}</td><td class="px-6 py-4 whitespace-nowrap font-medium">${t.symbol.toUpperCase()}</td><td class="px-6 py-4 whitespace-nowrap font-semibold ${typeColor[t.type]}">${typeText[t.type]}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.quantity, decimals)}</td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.price)} <span class="text-xs text-gray-500">${t.currency}</span></td><td class="px-6 py-4 whitespace-nowrap">${formatNumber(t.totalCostTWD, 0)}</td><td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium"><button data-id="${t.id}" class="edit-btn text-indigo-600 hover:text-indigo-900 mr-3">編輯</button><button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900">刪除</button></td>`;
