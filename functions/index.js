@@ -42,12 +42,11 @@ function findFxRate(market, currency, date, tolerance = 15) {
   return findNearest(hist, date, tolerance) ?? 1;
 }
 
-// --- 核心計算函式 (主計算引擎) ---
+// --- 核心計算函式 ---
 
 function getPortfolioStateOnDate(allEvts, targetDate) {
     const state = {};
     const pastEvents = allEvts.filter(e => toDate(e.date) <= toDate(targetDate));
-    // 業務邏輯確認：此處的邏輯是為了配合 yfinance 的前復權股價，將歷史股數用未來的拆股事件進行校正，以維持分析口徑一致
     const futureSplits = allEvts.filter(e => e.eventType === 'split' && toDate(e.date) > toDate(targetDate));
 
     for (const e of pastEvents) {
@@ -82,7 +81,6 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
         }
     }
 
-    // 對計算出的當日股數，應用未來拆股的校正
     for (const sym in state) {
         futureSplits
             .filter(s => s.symbol.toUpperCase() === sym)
@@ -365,23 +363,7 @@ function calculateCoreMetrics(evts, market, log) {
     return { holdings, totalRealizedPL, xirr, overallReturnRate };
 }
 
-// --- 資料庫與網路請求 (資料協調器 & 排程任務會使用) ---
-async function getMarketDataForSymbols(symbols, log) {
-    const marketData = {};
-    for (const s of [...new Set(symbols)]) {
-        if (!s) continue;
-        const col = s.includes("=") ? "exchange_rates" : "price_history";
-        const ref = db.collection(col).doc(s);
-        const doc = await ref.get();
-        if (doc.exists) {
-            marketData[s] = doc.data();
-        } else {
-            marketData[s] = null; // 標示為不存在
-        }
-    }
-    return marketData;
-}
-
+// --- 資料庫與網路請求 ---
 async function fetchAndSaveMarketData(symbol, log) {
   try {
     log(`Fetching full history for ${symbol} from Yahoo Finance...`);
@@ -395,7 +377,7 @@ async function fetchAndSaveMarketData(symbol, log) {
         return acc;
     }, {});
     
-    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-backfill-v4" };
+    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v5" };
     if (symbol.includes("=")) {
       payload.rates = payload.prices;
       delete payload.dividends;
@@ -412,7 +394,41 @@ async function fetchAndSaveMarketData(symbol, log) {
   }
 }
 
-// --- Main Recalculation Flow (主計算引擎) ---
+async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
+  const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
+  const currencies = [...new Set(txs.map(t => t.currency || "USD"))].filter(c => c !== "TWD");
+  const fxSyms = currencies.map(c => currencyToFx[c]).filter(Boolean);
+  const allRequiredSymbols = [...new Set([...syms, ...fxSyms, benchmarkSymbol.toUpperCase()])];
+
+  log(`Data check for symbols: ${allRequiredSymbols.join(', ')}`);
+  const marketData = {};
+  
+  for (const s of allRequiredSymbols) {
+    if (!s) continue;
+    const col = s.includes("=") ? "exchange_rates" : "price_history";
+    const ref = db.collection(col).doc(s);
+    const doc = await ref.get();
+    
+    if (doc.exists) {
+      marketData[s] = doc.data();
+    } else {
+      // 如果數據不存在，立即回填
+      log(`Data for ${s} not found in Firestore. Fetching now...`);
+      const fetchedData = await fetchAndSaveMarketData(s, log);
+      if (fetchedData) {
+        marketData[s] = fetchedData;
+      } else {
+        // 如果回填失敗，拋出錯誤以中止整個計算
+        throw new Error(`Failed to fetch critical market data for ${s}. Aborting calculation.`);
+      }
+    }
+  }
+  log("All required market data is present and loaded.");
+  return marketData;
+}
+
+
+// --- 主計算流程 (單一、強固的觸發點) ---
 async function performRecalculation(uid) {
     const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
     const logs = [];
@@ -423,13 +439,12 @@ async function performRecalculation(uid) {
     };
 
     try {
-        log("--- Calculation Engine Start ---");
+        log("--- Recalculation Process Start (Robust v5) ---");
 
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
         const holdingsSnap = await holdingsRef.get();
         const benchmarkSymbol = holdingsSnap.data()?.benchmarkSymbol || 'SPY';
-        log(`Using benchmark: ${benchmarkSymbol}`);
 
         const [txSnap, splitSnap] = await Promise.all([
             db.collection(`users/${uid}/transactions`).get(),
@@ -449,30 +464,16 @@ async function performRecalculation(uid) {
             return;
         }
 
-        const allSymbols = [...new Set([
-            ...txs.map(t => t.symbol.toUpperCase()),
-            ...txs.map(t => currencyToFx[t.currency]).filter(Boolean),
-            benchmarkSymbol.toUpperCase()
-        ])];
+        // 關鍵步驟：在計算前，確保所有數據都已存在，若不存在則會在此步驟中同步等待回填完成
+        const market = await getMarketDataFromDb(txs, benchmarkSymbol, log);
         
-        log(`Engine requires market data for: ${allSymbols.join(', ')}`);
-        const market = await getMarketDataForSymbols(allSymbols, log);
-
-        // 資料完整性二次確認 (正常情況下協調器已處理)
-        for(const sym of allSymbols) {
-            if(!market[sym]) {
-                log(`FATAL: Market data for ${sym} not found in DB when engine started. This should not happen. Aborting.`);
-                throw new Error(`Market data for ${sym} not found in DB.`);
-            }
-        }
-
         const { evts, firstBuyDate } = prepareEvents(txs, splits, market);
 
         if (!firstBuyDate) {
-            log("No buy transactions found, cannot start calculation.");
+            log("No buy transactions found, calculation not needed.");
             return;
         }
-        
+
         const portfolioResult = calculateCoreMetrics(evts, market, log);
         const dailyPortfolioValues = calculateDailyPortfolioValues(evts, market, firstBuyDate, log);
         const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, firstBuyDate, log);
@@ -483,9 +484,9 @@ async function performRecalculation(uid) {
         await holdingsRef.set(dataToWrite, { merge: true });
         await histRef.set(historyData);
         
-        log("--- Calculation Engine Done ---");
+        log("--- Recalculation Process Done ---");
     } catch (e) {
-        console.error(`[${uid}] An error occurred during calculation or write:`, e);
+        console.error(`[${uid}] CRITICAL ERROR during calculation:`, e);
         logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
     } finally {
         await logRef.set({ entries: logs });
@@ -497,15 +498,11 @@ async function performRecalculation(uid) {
 
 
 // --- Triggers ---
-
-// 主計算引擎觸發器
 exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
   .onWrite(async (chg, ctx) => {
     const beforeData = chg.before.data();
     const afterData = chg.after.data();
-    
-    // 如果文件被刪除，則不執行
     if (!afterData) return null;
     
     // 只有在 force_recalc_timestamp 欄位被新增或更新時才觸發
@@ -515,81 +512,7 @@ exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: 
     
     return null;
   });
-
-// 資料協調器 (合併交易與拆股事件)
-const dataCoordinator = async (uid) => {
-    const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
-    const logs = [];
-    const log = msg => {
-        const ts = new Date().toISOString();
-        logs.push(`[Coordinator] ${ts}: ${msg}`);
-        console.log(`[Coordinator][${uid}] ${ts}: ${msg}`);
-    };
-
-    try {
-        log("Coordinator triggered.");
-        const [txSnap, splitSnap] = await Promise.all([
-            db.collection(`users/${uid}/transactions`).get(),
-            db.collection(`users/${uid}/splits`).get()
-        ]);
-
-        const txs = txSnap.docs.map(d => ({ ...d.data() }));
-        if (txs.length === 0) {
-            log("No transactions for user. Triggering final cleanup calculation.");
-            // 即使沒有交易，也觸發一次計算以清空用戶數據
-            const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-            await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-            return;
-        }
-
-        const symbolsInPortfolio = [...new Set([...txs, ...splitSnap.docs.map(d => d.data())].map(item => item.symbol.toUpperCase()))];
-        const currencies = [...new Set(txs.map(t => t.currency || "USD"))].filter(c => c !== "TWD");
-        const fxSyms = currencies.map(c => currencyToFx[c]).filter(Boolean);
-        const allRequiredSymbols = [...new Set([...symbolsInPortfolio, ...fxSyms])];
-
-        log(`Symbols required by portfolio: ${allRequiredSymbols.join(', ')}`);
-        
-        const marketData = await getMarketDataForSymbols(allRequiredSymbols, log);
-        let allDataReady = true;
-
-        for (const symbol of allRequiredSymbols) {
-            if (!marketData[symbol]) {
-                log(`Data for ${symbol} is MISSING. Backfilling...`);
-                allDataReady = false;
-                const fetched = await fetchAndSaveMarketData(symbol, log);
-                if (!fetched) {
-                    log(`FATAL: Backfill for ${symbol} failed. Aborting coordination.`);
-                    return; // 中止協調
-                }
-            }
-        }
-        
-        if (allDataReady) {
-            log("All market data is ready in Firestore.");
-        } else {
-            log("Backfill completed for missing data.");
-        }
-
-        log("All checks passed. Triggering main calculation engine.");
-        const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-        await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-
-    } catch (e) {
-        log(`CRITICAL error in coordinator: ${e.message}`);
-    } finally {
-        await logRef.set({ entries: logs }, { merge: true });
-    }
-};
-
-exports.coordinateOnTransaction = functions.firestore
-  .document("users/{uid}/transactions/{txId}")
-  .onWrite((_, ctx) => dataCoordinator(ctx.params.uid));
-
-exports.coordinateOnSplit = functions.firestore
-  .document("users/{uid}/splits/{splitId}")
-  .onWrite((_, ctx) => dataCoordinator(ctx.params.uid));
-
-// Benchmark 更新觸發器
+  
 exports.onBenchmarkUpdate = functions.firestore
     .document('users/{uid}/controls/benchmark_control')
     .onWrite(async (chg, ctx) => {
@@ -597,81 +520,66 @@ exports.onBenchmarkUpdate = functions.firestore
         const data = chg.after.data();
         const uid = ctx.params.uid;
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-        console.log(`[${uid}] User requested benchmark update to ${data.symbol}. Triggering data coordinator.`);
+        console.log(`[${uid}] User requested benchmark update to ${data.symbol}.`);
         
-        // 先確保 Benchmark 的數據存在
-        const marketData = await getMarketDataForSymbols([data.symbol.toUpperCase()], (msg) => console.log(msg));
-        if (!marketData[data.symbol.toUpperCase()]) {
-            await fetchAndSaveMarketData(data.symbol.toUpperCase(), (msg) => console.log(msg));
-        }
-
-        // 接著觸發重新計算
+        // 關鍵修正：在觸發計算前，先確保新的 benchmark 數據已存在
+        await getMarketDataFromDb([], data.symbol, (msg) => console.log(`[Benchmark Pre-fetch] ${msg}`));
+        
+        console.log(`[${uid}] Pre-fetch for ${data.symbol} complete. Now triggering recalculation.`);
         await holdingsRef.set({
             benchmarkSymbol: data.symbol,
             force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         
-        // 刪除控制文件
         return chg.after.ref.delete();
     });
 
-// 全域價格更新觸發器
-const triggerRecalcForUsers = async (symbol, log) => {
-    const s = symbol.toUpperCase();
-    
-    // 尋找交易紀錄中有此 symbol 的使用者
-    const txQuery = db.collectionGroup("transactions").where("symbol", "==", s);
-    // 尋找將此 symbol 設為 benchmark 的使用者
-    const benchmarkQuery = db.collectionGroup("current_holdings").where("benchmarkSymbol", "==", s);
-    // 尋找交易貨幣對應到此匯率代碼的使用者
-    const fxSymbol = Object.keys(currencyToFx).find(key => currencyToFx[key] === s);
-    let fxQuery = null;
-    if (fxSymbol) {
-        fxQuery = db.collectionGroup("transactions").where("currency", "==", fxSymbol);
-    }
-    
-    const queries = [txQuery.get(), benchmarkQuery.get()];
-    if(fxQuery) queries.push(fxQuery.get());
-
-    const snapshots = await Promise.all(queries);
-    
-    const usersFromTx = snapshots[0].docs.map(d => d.ref.path.split("/")[1]);
-    const usersFromBenchmark = snapshots[1].docs.map(d => d.ref.path.split("/")[1]);
-    const usersFromFx = snapshots.length > 2 ? snapshots[2].docs.map(d => d.ref.path.split("/")[1]) : [];
-    
-    const usersToUpdate = new Set([...usersFromTx, ...usersFromBenchmark, ...usersFromFx].filter(Boolean));
-    
-    if (usersToUpdate.size === 0) {
-        log(`No users to update for symbol ${s}.`);
-        return null;
-    }
-    
-    log(`Found ${usersToUpdate.size} users to update for symbol ${s}: ${Array.from(usersToUpdate).join(', ')}. Triggering their coordinators.`);
-    const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all([...usersToUpdate].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
-
-    return null;
+// 統一的輕量級觸發器
+const triggerRecalculation = (ctx) => {
+    return db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
+      .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
 }
 
+exports.recalculateOnTransaction = functions.firestore
+  .document("users/{uid}/transactions/{txId}")
+  .onWrite((_, ctx) => triggerRecalculation(ctx));
+
+exports.recalculateOnSplit = functions.firestore
+  .document("users/{uid}/splits/{splitId}")
+  .onWrite((_, ctx) => triggerRecalculation(ctx));
+
+// 全域價格更新觸發器 (當排程更新價格後，通知相關用戶重新計算)
 exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
   .firestore.document("price_history/{symbol}")
   .onWrite(async (chg, ctx) => {
-      // 只在資料實際變動時觸發，避免無限循環
-      const before = chg.before.data();
-      const after = chg.after.data();
-      if (JSON.stringify(before?.prices) === JSON.stringify(after?.prices)) {
-          return null;
-      }
-      return triggerRecalcForUsers(ctx.params.symbol, (msg) => console.log(msg));
+    const s = ctx.params.symbol.toUpperCase();
+    const query1 = db.collectionGroup("transactions").where("symbol", "==", s);
+    const query2 = db.collectionGroup("current_holdings").where("benchmarkSymbol", "==", s);
+    
+    const [txSnap, benchmarkUsersSnap] = await Promise.all([query1.get(), query2.get()]);
+    
+    const usersFromTx = txSnap.docs.map(d => d.ref.path.split("/")[1]);
+    const usersFromBenchmark = benchmarkUsersSnap.docs.map(d => d.ref.path.split("/")[1]);
+    
+    const users = new Set([...usersFromTx, ...usersFromBenchmark].filter(Boolean));
+    if (users.size === 0) return null;
+
+    console.log(`Price update for ${s}. Triggering recalc for ${users.size} users.`);
+    const ts = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
+    return null;
   });
 
 exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
   .firestore.document("exchange_rates/{fxSym}")
   .onWrite(async (chg, ctx) => {
-      const before = chg.before.data();
-      const after = chg.after.data();
-      if (JSON.stringify(before?.rates) === JSON.stringify(after?.rates)) {
-          return null;
-      }
-      return triggerRecalcForUsers(ctx.params.fxSym, (msg) => console.log(msg));
+    const txSnap = await db.collectionGroup("transactions").get();
+    if (txSnap.empty) return null;
+    const users = new Set(txSnap.docs.map(d => d.ref.path.split("/")[1]).filter(Boolean));
+    if (users.size === 0) return null;
+
+    console.log(`FX rate for ${ctx.params.fxSym} updated. Triggering recalc for all ${users.size} active users.`);
+    const ts = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
+    return null;
   });
