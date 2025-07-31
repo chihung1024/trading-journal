@@ -11,9 +11,7 @@ const toDate = v => v.toDate ? v.toDate() : new Date(v);
 const currencyToFx = { USD: "TWD=X", HKD: "HKD=TWD", JPY: "JPY=TWD" };
 
 function getTotalCost(tx) {
-  return (tx.totalCost !== undefined && tx.totalCost !== null)
-    ? Number(tx.totalCost)
-    : Number(tx.price || 0) * Number(tx.quantity || 0);
+  return (tx.totalCost !== undefined && tx.totalCost !== null) ? Number(tx.totalCost) : Number(tx.price || 0) * Number(tx.quantity || 0);
 }
 
 function findNearest(hist, date, toleranceDays = 7) {
@@ -43,8 +41,6 @@ function findFxRate(market, currency, date, tolerance = 15) {
 }
 
 // --- 核心計算函式 ---
-
-// [最終修正] 恢復對未來拆股事件的校正邏輯
 function getPortfolioStateOnDate(allEvts, targetDate) {
     const state = {};
     const pastEvents = allEvts.filter(e => toDate(e.date) <= toDate(targetDate));
@@ -53,14 +49,10 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
     for (const e of pastEvents) {
         const sym = e.symbol.toUpperCase();
         if (!state[sym]) state[sym] = { lots: [], currency: e.currency || "USD" };
-        
         if (e.eventType === 'transaction') {
             state[sym].currency = e.currency;
-            const fx = 1; 
-            const costPerShareTWD = getTotalCost(e) / (e.quantity || 1) * fx;
-
             if (e.type === 'buy') {
-                state[sym].lots.push({ quantity: e.quantity, pricePerShareTWD: costPerShareTWD });
+                state[sym].lots.push({ date: toDate(e.date), quantity: e.quantity, pricePerShareTWD: getTotalCost(e) / (e.quantity || 1) });
             } else {
                 let sellQty = e.quantity;
                 while (sellQty > 0 && state[sym].lots.length > 0) {
@@ -81,18 +73,11 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
             });
         }
     }
-
-    // 對計算出的當日股數，應用未來拆股的校正
     for (const sym in state) {
-        futureSplits
-            .filter(s => s.symbol.toUpperCase() === sym)
-            .forEach(split => {
-                state[sym].lots.forEach(lot => {
-                    lot.quantity *= split.ratio;
-                });
-            });
+        futureSplits.filter(s => s.symbol.toUpperCase() === sym).forEach(split => {
+            state[sym].lots.forEach(lot => { lot.quantity *= split.ratio; });
+        });
     }
-
     return state;
 }
 
@@ -101,16 +86,14 @@ function dailyValue(state, market, date) {
         const s = state[sym];
         const qty = s.lots.reduce((sum, lot) => sum + lot.quantity, 0);
         if (qty < 1e-9) return totalValue;
-        
         const price = findNearest(market[sym]?.prices, date);
         if (price === undefined) {
              const yesterday = new Date(date);
              yesterday.setDate(yesterday.getDate() - 1);
-             const firstEventDate = toDate(s.lots[0]?.date || date);
-             if (yesterday < firstEventDate) return totalValue; // 防止無限遞迴
+             const firstEventDate = s.lots.length > 0 ? toDate(s.lots[0].date) : date;
+             if (yesterday < firstEventDate) return totalValue;
              return totalValue + dailyValue({[sym]: s}, market, yesterday);
         }
-        
         const fx = findFxRate(market, s.currency, date);
         return totalValue + (qty * price * (s.currency === "TWD" ? 1 : fx));
     }, 0);
@@ -125,12 +108,10 @@ function prepareEvents(txs, splits, market) {
             if (!firstBuyDateMap[sym] || d < firstBuyDateMap[sym]) firstBuyDateMap[sym] = d;
         }
     });
-
     const evts = [
         ...txs.map(t => ({ ...t, date: toDate(t.date), eventType: "transaction" })),
         ...splits.map(s => ({ ...s, date: toDate(s.date), eventType: "split" }))
     ];
-
     Object.keys(market).forEach(sym => {
         if (market[sym] && market[sym].dividends) {
             Object.entries(market[sym].dividends).forEach(([dateStr, amount]) => {
@@ -141,13 +122,12 @@ function prepareEvents(txs, splits, market) {
             });
         }
     });
-
     evts.sort((a, b) => toDate(a.date) - toDate(b.date));
     const firstTx = evts.find(e => e.eventType === 'transaction');
     return { evts, firstBuyDate: firstTx ? toDate(firstTx.date) : null, firstBuyDateMap };
 }
 
-function calculateDailyPortfolioValues(evts, market, startDate, log) {
+function calculateDailyPortfolioValues(evts, market, startDate) {
     if (!startDate) return {};
     let curDate = new Date(startDate);
     curDate.setUTCHours(0, 0, 0, 0);
@@ -166,22 +146,18 @@ function calculateDailyPortfolioValues(evts, market, startDate, log) {
 function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, startDate, log) {
     const dates = Object.keys(dailyPortfolioValues).sort();
     if (!startDate || dates.length === 0) return { twrHistory: {}, benchmarkHistory: {} };
-
     const upperBenchmarkSymbol = benchmarkSymbol.toUpperCase();
     const benchmarkPrices = market[upperBenchmarkSymbol]?.prices || {};
     const benchmarkStartPrice = findNearest(benchmarkPrices, startDate);
-
     if (!benchmarkStartPrice) {
-        log(`TWR_CALC_FAIL: Cannot find start price for benchmark ${upperBenchmarkSymbol} on ${startDate.toISOString().split('T')[0]}.`);
+        log(`TWR_CALC_FAIL: Cannot find start price for benchmark ${upperBenchmarkSymbol}.`);
         return { twrHistory: {}, benchmarkHistory: {} };
     }
-
     const cashflows = evts.reduce((acc, e) => {
         const dateStr = toDate(e.date).toISOString().split('T')[0];
         let flow = 0;
         const currency = e.currency || market[e.symbol.toUpperCase()]?.currency || 'USD';
         const fx = findFxRate(market, currency, toDate(e.date));
-
         if (e.eventType === 'transaction') {
             const cost = getTotalCost(e);
             flow = (e.type === 'buy' ? 1 : -1) * cost * (currency === 'TWD' ? 1 : fx);
@@ -192,66 +168,49 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
                 flow = -1 * e.amount * shares * fx;
             }
         }
-        if (flow !== 0) {
-            acc[dateStr] = (acc[dateStr] || 0) + flow;
-        }
+        if (flow !== 0) acc[dateStr] = (acc[dateStr] || 0) + flow;
         return acc;
     }, {});
-    
-    const twrHistory = {};
-    const benchmarkHistory = {};
-    let cumulativeHpr = 1;
-    let lastMarketValue = 0;
-
+    let cumulativeHpr = 1, lastMarketValue = 0;
+    const twrHistory = {}, benchmarkHistory = {};
     for (const dateStr of dates) {
         const MVE = dailyPortfolioValues[dateStr]; 
         const CF = cashflows[dateStr] || 0; 
-
         const denominator = lastMarketValue + CF;
-        if (denominator !== 0) {
-            const periodReturn = MVE / denominator;
-            cumulativeHpr *= periodReturn;
-        }
-
+        if (denominator !== 0) cumulativeHpr *= MVE / denominator;
         twrHistory[dateStr] = (cumulativeHpr - 1) * 100;
         lastMarketValue = MVE;
-        
         const currentBenchPrice = findNearest(benchmarkPrices, new Date(dateStr));
-        if (currentBenchPrice) {
-            benchmarkHistory[dateStr] = ((currentBenchPrice / benchmarkStartPrice) - 1) * 100;
-        }
+        if (currentBenchPrice) benchmarkHistory[dateStr] = ((currentBenchPrice / benchmarkStartPrice) - 1) * 100;
     }
-    
     return { twrHistory, benchmarkHistory };
 }
 
 function calculateFinalHoldings(pf, market) {
-  const out = {};
-  const today = new Date();
-  for (const sym in pf) {
-    const h = pf[sym];
-    const qty = h.lots.reduce((s, l) => s + l.quantity, 0);
-    if (qty < 1e-9) continue;
-    const totCostTWD = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareTWD, 0);
-    const totCostOrg = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareOriginal, 0);
-    const priceHist = market[sym]?.prices || {};
-    const curPrice = findNearest(priceHist, today);
-    const fx = findFxRate(market, h.currency, today);
-    const mktVal = qty * (curPrice ?? 0) * (h.currency === "TWD" ? 1 : fx);
-    const unreal = mktVal - totCostTWD;
-    const invested = totCostTWD + h.realizedCostTWD;
-    const totalRet = unreal + h.realizedPLTWD;
-    const rrCurrent = totCostTWD > 0 ? (unreal / totCostTWD) * 100 : 0;
-    const rrTotal = invested > 0 ? (totalRet / invested) * 100 : 0;
-    out[sym] = {
-      symbol: sym, quantity: qty, currency: h.currency,
-      avgCostOriginal: totCostOrg > 0 ? totCostOrg / qty : 0, totalCostTWD: totCostTWD, investedCostTWD: invested,
-      currentPriceOriginal: curPrice ?? null, marketValueTWD: mktVal,
-      unrealizedPLTWD: unreal, realizedPLTWD: h.realizedPLTWD,
-      returnRateCurrent: rrCurrent, returnRateTotal: rrTotal, returnRate: rrCurrent
-    };
-  }
-  return out;
+    const out = {}, today = new Date();
+    for (const sym in pf) {
+        const h = pf[sym], qty = h.lots.reduce((s, l) => s + l.quantity, 0);
+        if (qty < 1e-9) continue;
+        const totCostTWD = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareTWD, 0);
+        const totCostOrg = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareOriginal, 0);
+        const priceHist = market[sym]?.prices || {};
+        const curPrice = findNearest(priceHist, today);
+        const fx = findFxRate(market, h.currency, today);
+        const mktVal = qty * (curPrice ?? 0) * (h.currency === "TWD" ? 1 : fx);
+        const unreal = mktVal - totCostTWD;
+        const invested = totCostTWD + h.realizedCostTWD;
+        const totalRet = unreal + h.realizedPLTWD;
+        const rrCurrent = totCostTWD > 0 ? (unreal / totCostTWD) * 100 : 0;
+        const rrTotal = invested > 0 ? (totalRet / invested) * 100 : 0;
+        out[sym] = {
+            symbol: sym, quantity: qty, currency: h.currency,
+            avgCostOriginal: totCostOrg > 0 ? totCostOrg / qty : 0, totalCostTWD: totCostTWD, investedCostTWD: invested,
+            currentPriceOriginal: curPrice ?? null, marketValueTWD: mktVal,
+            unrealizedPLTWD: unreal, realizedPLTWD: h.realizedPLTWD,
+            returnRate: rrCurrent, returnRateTotal: rrTotal,
+        };
+    }
+    return out;
 }
 
 function createCashflowsForXirr(evts, holdings, market) {
@@ -272,18 +231,14 @@ function createCashflowsForXirr(evts, holdings, market) {
         }
     });
     const totalMarketValue = Object.values(holdings).reduce((s, h) => s + h.marketValueTWD, 0);
-    if (totalMarketValue > 0) {
-        flows.push({ date: new Date(), amount: totalMarketValue });
-    }
+    if (totalMarketValue > 0) flows.push({ date: new Date(), amount: totalMarketValue });
     const combined = flows.reduce((acc, flow) => {
         const dateStr = flow.date.toISOString().slice(0, 10);
         acc[dateStr] = (acc[dateStr] || 0) + flow.amount;
         return acc;
     }, {});
-    return Object.entries(combined)
-        .filter(([,amount]) => Math.abs(amount) > 1e-6)
-        .map(([date, amount]) => ({ date: new Date(date), amount }))
-        .sort((a, b) => a.date - b.date);
+    return Object.entries(combined).filter(([,amount]) => Math.abs(amount) > 1e-6)
+        .map(([date, amount]) => ({ date: new Date(date), amount })).sort((a, b) => a.date - b.date);
 }
 
 function calculateXIRR(flows) {
@@ -304,7 +259,7 @@ function calculateXIRR(flows) {
     return npv < 1e-6 ? guess : null;
 }
 
-function calculateCoreMetrics(evts, market, log) {
+function calculateCoreMetrics(evts, market) {
     const pf = {};
     let totalRealizedPL = 0;
     for (const e of evts) {
@@ -315,7 +270,7 @@ function calculateCoreMetrics(evts, market, log) {
                 const fx = findFxRate(market, e.currency, toDate(e.date));
                 const costTWD = getTotalCost(e) * (e.currency === "TWD" ? 1 : fx);
                 if (e.type === "buy") {
-                    pf[sym].lots.push({ quantity: e.quantity, pricePerShareOriginal: e.price, pricePerShareTWD: costTWD / e.quantity, date: toDate(e.date) });
+                    pf[sym].lots.push({ date: toDate(e.date), quantity: e.quantity, pricePerShareOriginal: e.price, pricePerShareTWD: costTWD / e.quantity });
                 } else {
                     let sellQty = e.quantity;
                     const saleProceedsTWD = costTWD;
@@ -337,9 +292,7 @@ function calculateCoreMetrics(evts, market, log) {
             }
             case "split":
                 pf[sym].lots.forEach(l => {
-                    l.quantity *= e.ratio;
-                    l.pricePerShareTWD /= e.ratio;
-                    l.pricePerShareOriginal /= e.ratio;
+                    l.quantity *= e.ratio; l.pricePerShareTWD /= e.ratio; l.pricePerShareOriginal /= e.ratio;
                 });
                 break;
             case "dividend": {
@@ -365,193 +318,171 @@ function calculateCoreMetrics(evts, market, log) {
     return { holdings, totalRealizedPL, xirr, overallReturnRate };
 }
 
-async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
-  const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
-  const currencies = [...new Set(txs.map(t => t.currency || "USD"))].filter(c => c !== "TWD");
-  const fxSyms = currencies.map(c => currencyToFx[c]).filter(Boolean);
-  const all = [...new Set([...syms, ...fxSyms, benchmarkSymbol.toUpperCase()])];
-
-  log(`Fetching market data for: ${all.join(', ')}`);
-  const out = {};
-  for (const s of all) {
-    if (!s) continue;
-    const col = s.includes("=") ? "exchange_rates" : "price_history";
-    const ref = db.collection(col).doc(s);
-    const doc = await ref.get();
-    if (doc.exists) {
-      out[s] = doc.data();
-      continue;
-    }
-    const fetched = await fetchAndSaveMarketData(s, log);
-    if (fetched) {
-      out[s] = fetched;
-      await ref.set(fetched);
-    } else {
-      log(`fetch market data failed for symbol: ${s}, set empty object`);
-      out[s] = { prices: {}, dividends: {}, splits: {} };
-    }
-  }
-  return out;
-}
-
-async function fetchAndSaveMarketData(symbol, log) {
-  try {
-    const hist = await yahooFinance.historical(symbol, { period1: '2000-01-01', interval: '1d' });
-    const prices = hist.reduce((acc, cur) => {
-        acc[cur.date.toISOString().split("T")[0]] = cur.close;
-        return acc;
-    }, {});
-    const dividends = hist.reduce((acc, cur) => {
-        if(cur.dividends && cur.dividends > 0) acc[cur.date.toISOString().split("T")[0]] = cur.dividends;
-        return acc;
-    }, {});
-    
-    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "emergency-fetch-v3" };
-    if (symbol.includes("=")) {
-      payload.rates = payload.prices;
-      delete payload.dividends;
-    }
-    return payload;
-  } catch (e) {
-    log(`fetch ${symbol} err ${e.message}`);
-    return null;
-  }
-}
-
-// --- Main Recalculation Flow ---
-async function performRecalculation(uid) {
-    const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
-    const logs = [];
-    const log = msg => {
-        const ts = new Date().toISOString();
-        logs.push(`${ts}: ${msg}`);
-        console.log(`[${uid}] ${ts}: ${msg}`);
-    };
-
+// --- Market Data ---
+async function fetchAndSaveMarketData(symbol, startDate, log) {
     try {
-        log("--- Recalc start (Final Corrected Version) ---");
-
-        const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-        const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
-        const holdingsSnap = await holdingsRef.get();
-        const benchmarkSymbol = holdingsSnap.data()?.benchmarkSymbol || 'SPY';
-        log(`Using benchmark: ${benchmarkSymbol}`);
-
-        const [txSnap, splitSnap] = await Promise.all([
-            db.collection(`users/${uid}/transactions`).get(),
-            db.collection(`users/${uid}/splits`).get()
-        ]);
-        const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-        if (txs.length === 0) {
-            await holdingsRef.set({
-                holdings: {}, totalRealizedPL: 0, xirr: null, overallReturnRate: 0,
-                benchmarkSymbol: benchmarkSymbol,
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            });
-            await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() });
-            await histRef.set({ history: {}, twrHistory: {}, benchmarkHistory: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
-            log("no tx, cleared");
-            return;
-        }
-
-        const market = await getMarketDataFromDb(txs, benchmarkSymbol, log);
-        const { evts, firstBuyDate } = prepareEvents(txs, splits, market);
-
-        if (!firstBuyDate) {
-            log("No buy transactions found, cannot start calculation.");
-            await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() });
-            return;
-        }
-
-        const portfolioResult = calculateCoreMetrics(evts, market, log);
-        const dailyPortfolioValues = calculateDailyPortfolioValues(evts, market, firstBuyDate, log);
-        const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, firstBuyDate, log);
-        
-        const dataToWrite = { ...portfolioResult, benchmarkSymbol, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
-        const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
-        
-        await holdingsRef.set(dataToWrite);
-        await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() });
-        await histRef.set(historyData);
-        
-        log("--- Recalc done ---");
+        const queryDate = new Date(startDate);
+        queryDate.setDate(queryDate.getDate() - 35);
+        log(`Fetching FULL history for ${symbol} from ${queryDate.toISOString().split('T')[0]}`);
+        const hist = await yahooFinance.historical(symbol, { period1: queryDate, interval: '1d' });
+        const prices = hist.reduce((acc, cur) => { acc[cur.date.toISOString().split("T")[0]] = cur.close; return acc; }, {});
+        const dividends = hist.reduce((acc, cur) => { if(cur.dividends && cur.dividends > 0) acc[cur.date.toISOString().split("T")[0]] = cur.dividends; return acc; }, {});
+        const payload = { prices, dividends, splits: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "on-demand-fetch-v4" };
+        if (symbol.includes("=")) { payload.rates = payload.prices; delete payload.dividends; }
+        return payload;
     } catch (e) {
-        console.error(`[${uid}] An error occurred during calculation or write:`, e);
-        logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
-    } finally {
-        await logRef.set({ entries: logs });
+        log(`fetchAndSaveMarketData for ${symbol} ERROR: ${e.message}`);
+        return null;
     }
 }
 
-// --- Triggers ---
-exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
+// --- Main Flow & Triggers ---
+async function performRecalculation(uid, log) {
+    const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
+    const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
+    const holdingsSnap = await holdingsRef.get();
+    if (!holdingsSnap.exists) { log("No holdings doc, aborting."); return; }
+    const benchmarkSymbol = holdingsSnap.data()?.benchmarkSymbol || 'SPY';
+    log(`Using benchmark: ${benchmarkSymbol}`);
+
+    const [txSnap, splitSnap] = await Promise.all([
+        db.collection(`users/${uid}/transactions`).get(),
+        db.collection(`users/${uid}/splits`).get()
+    ]);
+    const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const splits = splitSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    if (txs.length === 0) {
+        await holdingsRef.set({ holdings: {}, totalRealizedPL: 0, xirr: null, overallReturnRate: 0, benchmarkSymbol, lastUpdated: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        await histRef.set({ history: {}, twrHistory: {}, benchmarkHistory: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
+        log("No transactions, cleared user data.");
+        return;
+    }
+
+    const { evts, firstBuyDate } = prepareEvents(txs, splits, {});
+    if (!firstBuyDate) {
+        log("No buy transactions found.");
+        return;
+    }
+    const market = await getMarketDataFromDb(txs, benchmarkSymbol, log);
+    const refreshedEvents = prepareEvents(txs, splits, market).evts;
+    
+    const portfolioResult = calculateCoreMetrics(refreshedEvents, market);
+    const dailyPortfolioValues = calculateDailyPortfolioValues(refreshedEvents, market, firstBuyDate);
+    const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, refreshedEvents, market, benchmarkSymbol, firstBuyDate, log);
+    
+    const dataToWrite = { ...portfolioResult, benchmarkSymbol, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
+    const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
+    
+    await holdingsRef.set(dataToWrite);
+    await histRef.set(historyData);
+    log("Recalculation done.");
+}
+
+exports.dataOrchestrator = functions.firestore
+    .document('users/{uid}/transactions/{txId}')
+    .onWrite(async (chg, ctx) => {
+        const uid = ctx.params.uid;
+        const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
+        const log = (msg) => logRef.set({ entries: admin.firestore.FieldValue.arrayUnion(`${new Date().toISOString()}: ${msg}`) }, { merge: true });
+        
+        log(`Orchestrator triggered by transaction write.`);
+        const txsSnap = await db.collection(`users/${uid}/transactions`).get();
+        if (txsSnap.empty) {
+            await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return;
+        }
+
+        const txs = txsSnap.docs.map(d => d.data());
+        const holdingsSnap = await db.doc(`users/${uid}/user_data/current_holdings`).get();
+        const benchmarkSymbol = holdingsSnap.data()?.benchmarkSymbol || 'SPY';
+        const globalStartDate = toDate(txs.reduce((earliest, tx) => toDate(tx.date) < earliest ? toDate(tx.date) : earliest, new Date()));
+        
+        const symbolsInTxs = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
+        const symbolsToProcess = [...new Set([...symbolsInTxs, benchmarkSymbol, "TWD=X"])];
+        let wasDataFetched = false;
+
+        for (const symbol of symbolsToProcess) {
+            const isForex = symbol.includes("=");
+            const collection = isForex ? "exchange_rates" : "price_history";
+            const priceDocRef = db.doc(`${collection}/${symbol}`);
+            const priceDoc = await priceDocRef.get();
+            const prices = priceDoc.data()?.prices || priceDoc.data()?.rates || {};
+            const priceDates = Object.keys(prices);
+            
+            const startDateForSymbol = symbol === benchmarkSymbol || isForex 
+                ? globalStartDate
+                : toDate(txs.filter(t => t.symbol.toUpperCase() === symbol).reduce((e, t) => toDate(t.date) < e ? toDate(t.date) : e, new Date()));
+
+            const requiredStartDate = new Date(startDateForSymbol);
+            requiredStartDate.setDate(requiredStartDate.getDate() - 30);
+
+            if (priceDates.length === 0 || new Date(priceDates.sort()[0]) > requiredStartDate) {
+                log(`Backfill needed for ${symbol}. Required since ${requiredStartDate.toISOString().split('T')[0]}`);
+                const fullHistory = await fetchAndSaveMarketData(symbol, requiredStartDate, log);
+                if (fullHistory) {
+                    await priceDocRef.set(fullHistory);
+                    wasDataFetched = true;
+                }
+            }
+        }
+        
+        if (!wasDataFetched) {
+            log("No backfill needed, triggering recalculation directly.");
+            await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        } else {
+            // Recalculation will be triggered by recalculateOnPriceHistoryWrite
+            log("Backfill completed. Recalculation will be triggered by price_history update.");
+        }
+    });
+
+exports.recalculateOnPriceHistoryWrite = functions.firestore
+    .document('price_history/{symbol}')
+    .onWrite(async (chg, ctx) => {
+        const symbol = ctx.params.symbol.toUpperCase();
+        const holdingsGroup = db.collectionGroup("current_holdings");
+        const query1 = holdingsGroup.where(`holdings.${symbol}.symbol`, "==", symbol).get();
+        const query2 = holdingsGroup.where("benchmarkSymbol", "==", symbol).get();
+        const [holdersSnap, benchmarkUsersSnap] = await Promise.all([query1, query2]);
+        const uids = new Set([...holdersSnap.docs.map(d => d.ref.path.split('/')[1]), ...benchmarkUsersSnap.docs.map(d => d.ref.path.split('/')[1])]);
+        if (uids.size > 0) {
+            console.log(`Price update for ${symbol} affects users: ${[...uids].join(', ')}`);
+            const ts = admin.firestore.FieldValue.serverTimestamp();
+            await Promise.all([...uids].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
+        }
+    });
+    
+exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "2GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
-  .onWrite((chg, ctx) => {
+  .onWrite(async (chg, ctx) => {
+    const uid = ctx.params.uid;
     const beforeData = chg.before.data();
     const afterData = chg.after.data();
-    if (beforeData && !afterData) return null;
-    if (!beforeData || (afterData.force_recalc_timestamp && afterData.force_recalc_timestamp !== beforeData?.force_recalc_timestamp)) {
-      return performRecalculation(ctx.params.uid);
-    }
-    return null;
+    if (!afterData) return null;
+    if (beforeData?.force_recalc_timestamp?.isEqual(afterData.force_recalc_timestamp)) return null;
+    if (!afterData.force_recalc_timestamp) return null; // Only run if timestamp is present
+
+    const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
+    const log = (msg) => logRef.set({ entries: admin.firestore.FieldValue.arrayUnion(`${new Date().toISOString()}: ${msg}`) }, { merge: true });
+    
+    await performRecalculation(uid, log);
+    await chg.after.ref.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() });
   });
-  
+
 exports.onBenchmarkUpdate = functions.firestore
     .document('users/{uid}/controls/benchmark_control')
     .onWrite(async (chg, ctx) => {
         if (!chg.after.exists) return null;
         const data = chg.after.data();
         const uid = ctx.params.uid;
-        const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-        console.log(`[${uid}] User requested benchmark update to ${data.symbol}. Triggering recalculation.`);
-        await holdingsRef.set({
+        await db.doc(`users/${uid}/user_data/current_holdings`).set({
             benchmarkSymbol: data.symbol,
             force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         return chg.after.ref.delete();
     });
 
-exports.recalculateOnTransaction = functions.firestore
-  .document("users/{uid}/transactions/{txId}")
-  .onWrite((_, ctx) => db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
-      .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
-
 exports.recalculateOnSplit = functions.firestore
   .document("users/{uid}/splits/{splitId}")
   .onWrite((_, ctx) => db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
       .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
-
-exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
-  .firestore.document("price_history/{symbol}")
-  .onWrite(async (chg, ctx) => {
-    const s = ctx.params.symbol.toUpperCase();
-    const query1 = db.collectionGroup("transactions").where("symbol", "==", s).get();
-    const holdingsGroup = db.collectionGroup("current_holdings");
-    const query2 = holdingsGroup.where("benchmarkSymbol", "==", s).get();
-    
-    const [txSnap, benchmarkUsersSnap] = await Promise.all([query1, query2]);
-    
-    const usersFromTx = txSnap.docs.map(d => d.ref.path.split("/")[1]);
-    const usersFromBenchmark = benchmarkUsersSnap.docs.map(d => d.ref.path.split("/")[1]);
-    
-    const users = new Set([...usersFromTx, ...usersFromBenchmark].filter(Boolean));
-    if (users.size === 0) return null;
-
-    const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
-    return null;
-  });
-
-exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
-  .firestore.document("exchange_rates/{fxSym}")
-  .onWrite(async (chg, ctx) => {
-    const txSnap = await db.collectionGroup("transactions").get();
-    if (txSnap.empty) return null;
-    const users = new Set(txSnap.docs.map(d => d.ref.path.split("/")[1]).filter(Boolean));
-    if (users.size === 0) return null;
-    const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
-    return null;
-  });
