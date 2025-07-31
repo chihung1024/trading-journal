@@ -126,9 +126,9 @@
 
     <script type="module">
         // --- Firebase SDK ---
-        // BUG FIX: 引入 deleteField 以便能刪除 Firestore 文件中的欄位
         import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
         import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+        // FINAL BUG FIX: 引入 deleteField 以便能刪除 Firestore 文件中的欄位
         import { getFirestore, collection, doc, addDoc, onSnapshot, updateDoc, deleteDoc, query, orderBy, getDoc, setDoc, serverTimestamp, deleteField } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
         // --- Firebase Configuration ---
@@ -561,7 +561,7 @@
             return closestDate ? history[closestDate] : null;
         }
         
-        // BUG FIX: 全面修改 handleFormSubmit 以正確處理可選欄位的刪除
+        // FINAL BUG FIX: handleFormSubmit 的最終修正版
         async function handleFormSubmit(e) {
             e.preventDefault();
             if (!userId) { 
@@ -572,7 +572,8 @@
             const id = document.getElementById('transaction-id').value;
             const isEditing = !!id;
 
-            const transactionData = { 
+            // 步驟 1: 建立一個只包含必填欄位的基礎物件
+            const payload = { 
                 date: new Date(document.getElementById('transaction-date').value),
                 symbol: document.getElementById('stock-symbol').value.toUpperCase().trim(), 
                 type: document.querySelector('input[name="transaction-type"]:checked').value, 
@@ -581,44 +582,49 @@
                 currency: document.getElementById('currency').value 
             };
 
-            if (!transactionData.symbol || isNaN(transactionData.quantity) || isNaN(transactionData.price)) {
+            // 步驟 2: 驗證必填欄位
+            if (!payload.symbol || isNaN(payload.quantity) || isNaN(payload.price)) {
                 showNotification('error', '請填寫所有必填欄位。');
                 return;
             }
 
-            // 處理可選的手動匯率
+            // 步驟 3: 根據輸入情況，動態地處理可選欄位
+            
+            // 處理手動匯率
             const exchangeRateInput = document.getElementById('exchange-rate').value.trim();
-            if (transactionData.currency === 'USD') {
-                if (exchangeRateInput !== '') {
+            if (payload.currency === 'USD') {
+                if (exchangeRateInput) {
                     const exchangeRate = parseFloat(exchangeRateInput);
+                    // 只有在輸入是有效數字時才加入
                     if (!isNaN(exchangeRate) && exchangeRate > 0) {
-                        transactionData.exchangeRate = exchangeRate;
+                        payload.exchangeRate = exchangeRate;
                     }
                 } else if (isEditing) {
-                    // 如果是編輯模式且輸入框為空，則刪除該欄位
-                    transactionData.exchangeRate = deleteField();
+                    // 如果是編輯模式且輸入框為空，則加入刪除指令
+                    payload.exchangeRate = deleteField();
                 }
             }
             
-            // 處理可選的總成本
+            // 處理總成本
             const totalCostInput = document.getElementById('total-cost').value.trim();
-            if (totalCostInput !== '') {
+            if (totalCostInput) {
                 const totalCost = parseFloat(totalCostInput);
+                // 只有在輸入是有效數字時才加入
                 if (!isNaN(totalCost) && totalCost > 0) {
-                    transactionData.totalCost = totalCost;
+                    payload.totalCost = totalCost;
                 }
             } else if (isEditing) {
-                // 如果是編輯模式且輸入框為空，則刪除該欄位
-                transactionData.totalCost = deleteField();
+                // 如果是編輯模式且輸入框為空，則加入刪除指令
+                payload.totalCost = deleteField();
             }
             
+            // 步驟 4: 執行資料庫操作
             const txCol = collection(db, 'users', userId, 'transactions');
             try {
                 if (isEditing) {
-                    await updateDoc(doc(txCol, id), transactionData);
+                    await updateDoc(doc(txCol, id), payload);
                 } else {
-                    // 新增文件時，不應包含 deleteField() 物件，目前邏輯已能避免此情況
-                    await addDoc(txCol, transactionData);
+                    await addDoc(txCol, payload);
                 }
                 closeModal();
                 showNotification('success', isEditing ? '交易已更新！' : '交易已新增！');
