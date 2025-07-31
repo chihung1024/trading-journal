@@ -58,46 +58,30 @@ def get_all_symbols_to_update(db):
     return final_list
 
 def fetch_and_update_market_data(db, symbols):
-    # 公用標的固定更新
     common_symbols = ["TWD=X"]
     all_symbols_to_update = list(set(symbols + common_symbols))
     
-    # 預先讀取一次 GLOBAL metadata
-    global_earliest_date = None
-    try:
-        global_meta_ref = db.collection("stock_metadata").document("--GLOBAL--").get()
-        if global_meta_ref.exists:
-            global_earliest_date = global_meta_ref.to_dict().get("earliestTxDate")
-    except Exception as e:
-        print(f"Could not read global metadata. Error: {e}")
-
     for symbol in all_symbols_to_update:
         if not symbol: continue
         
         print(f"--- Processing: {symbol} ---")
         
         start_date = None
-        earliest_tx_date = None
-        # 判斷是否為公用標的 (匯率) 或 benchmark (從 symbols 傳入)
         is_common_symbol = symbol in common_symbols or "=" in symbol
 
         try:
-            if is_common_symbol:
-                earliest_tx_date = global_earliest_date
-                print(f"Symbol {symbol} is a common symbol, using global earliest date.")
-            else:
+            if not is_common_symbol:
                 metadata_ref = db.collection("stock_metadata").document(symbol).get()
                 if metadata_ref.exists:
                     earliest_tx_date = metadata_ref.to_dict().get("earliestTxDate")
-                    print(f"Found metadata for stock {symbol}.")
-
-            if earliest_tx_date:
-                # Firestore timestamp is timezone-aware, yfinance needs naive datetime
-                if hasattr(earliest_tx_date, 'replace'):
-                    earliest_dt = earliest_tx_date.replace(tzinfo=None)
-                    start_dt = earliest_dt - timedelta(days=30)
-                    start_date = start_dt.strftime('%Y-%m-%d')
-                    print(f"Fetching data for {symbol} from {start_date}.")
+                    if earliest_tx_date:
+                        if hasattr(earliest_tx_date, 'replace'):
+                            earliest_dt = earliest_tx_date.replace(tzinfo=None)
+                            start_dt = earliest_dt - timedelta(days=30)
+                            start_date = start_dt.strftime('%Y-%m-%d')
+                            print(f"Found metadata for stock {symbol}. Fetching from {start_date}.")
+            else:
+                print(f"Symbol {symbol} is a common symbol, fetching MAX history.")
 
         except Exception as e:
             print(f"Could not read metadata for {symbol}, falling back to max period. Error: {e}")
@@ -126,7 +110,7 @@ def fetch_and_update_market_data(db, symbols):
                     "prices": prices,
                     "dividends": dividends,
                     "lastUpdated": datetime.now().isoformat(),
-                    "dataSource": "yfinance-daily-refresh-v10"
+                    "dataSource": "yfinance-daily-refresh-final"
                 }
                 if is_forex:
                     payload["rates"] = payload.pop("prices")
