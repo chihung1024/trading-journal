@@ -320,8 +320,10 @@ async function fetchAndSaveMarketData(symbol, startDate, log) {
         queryDate.setDate(queryDate.getDate() - 35);
         log(`Fetching FULL history for ${symbol} from ${queryDate.toISOString().split('T')[0]}`);
         const hist = await yahooFinance.historical(symbol, { period1: queryDate, interval: '1d' });
+        log(`Fetched ${hist.length} price points for ${symbol}.`);
         const prices = hist.reduce((acc, cur) => { acc[cur.date.toISOString().split("T")[0]] = cur.close; return acc; }, {});
         const dividends = hist.reduce((acc, cur) => { if(cur.dividends && cur.dividends > 0) acc[cur.date.toISOString().split("T")[0]] = cur.dividends; return acc; }, {});
+        log(`Found ${Object.keys(dividends).length} dividend points for ${symbol}.`);
         const payload = { prices, dividends, splits: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "on-demand-fetch-v5" };
         if (symbol.includes("=")) { payload.rates = payload.prices; delete payload.dividends; }
         return payload;
@@ -338,6 +340,8 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
     const all = [...new Set([...syms, ...fxSyms, benchmarkSymbol.toUpperCase()])];
     log(`Required market data for: ${all.join(', ')}`);
     const out = {};
+    const globalStartDate = toDate(txs.reduce((earliest, tx) => toDate(tx.date) < earliest ? toDate(tx.date) : earliest, new Date()));
+
     for (const s of all) {
         if (!s) continue;
         const col = s.includes("=") ? "exchange_rates" : "price_history";
@@ -346,9 +350,7 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
         if (doc.exists) {
             out[s] = doc.data();
         } else {
-            // [最終修正] 在主計算流程中加入緊急備用抓取，確保冷啟動萬無一失
             log(`Market data for ${s} not in DB. Performing emergency fetch...`);
-            const globalStartDate = toDate(txs.reduce((earliest, tx) => toDate(tx.date) < earliest ? toDate(tx.date) : earliest, new Date()));
             const fetched = await fetchAndSaveMarketData(s, globalStartDate, log);
             if(fetched){
                 await ref.set(fetched);
@@ -447,36 +449,3 @@ exports.recalculateOnSplit = functions.firestore
   .document("users/{uid}/splits/{splitId}")
   .onWrite((_, ctx) => db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
       .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
-
-exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
-  .firestore.document("price_history/{symbol}")
-  .onWrite(async (chg, ctx) => {
-    const s = ctx.params.symbol.toUpperCase();
-    const query1 = db.collectionGroup("transactions").where("symbol", "==", s).get();
-    const holdingsGroup = db.collectionGroup("current_holdings");
-    const query2 = holdingsGroup.where("benchmarkSymbol", "==", s).get();
-    
-    const [txSnap, benchmarkUsersSnap] = await Promise.all([query1, query2]);
-    
-    const usersFromTx = txSnap.docs.map(d => d.ref.path.split("/")[1]);
-    const usersFromBenchmark = benchmarkUsersSnap.docs.map(d => d.ref.path.split("/")[1]);
-    
-    const users = new Set([...usersFromTx, ...usersFromBenchmark].filter(Boolean));
-    if (users.size === 0) return null;
-
-    const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
-    return null;
-  });
-
-exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
-  .firestore.document("exchange_rates/{fxSym}")
-  .onWrite(async (chg, ctx) => {
-    const txSnap = await db.collectionGroup("transactions").get();
-    if (txSnap.empty) return null;
-    const users = new Set(txSnap.docs.map(d => d.ref.path.split("/")[1]).filter(Boolean));
-    if (users.size === 0) return null;
-    const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
-    return null;
-  });
