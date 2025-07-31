@@ -1,5 +1,4 @@
 /* eslint-disable */
-// v2 版語法：從 firebase-functions/v2 引入模組
 const { onRequest } = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { setGlobalOptions } = require("firebase-functions/v2");
@@ -12,10 +11,9 @@ admin.initializeApp();
 const db = admin.firestore();
 const tasksClient = new CloudTasksClient();
 
-// v2 版語法：設定全域選項，例如地區和逾時
 setGlobalOptions({ region: "us-central1", timeoutSeconds: 300, memory: "1GiB" });
 
-// --- 基礎工具函式 & 核心計算函式 (此區塊無變動) ---
+// --- 基礎工具函式 ---
 const toDate = v => v.toDate ? v.toDate() : new Date(v);
 const currencyToFx = { USD: "TWD=X", HKD: "HKD=TWD", JPY: "JPY=TWD" };
 
@@ -57,6 +55,8 @@ function findFxRate(market, currency, date, tolerance = 15) {
   return findNearest(hist, date, tolerance) ?? 1;
 }
 
+// --- 核心計算函式 ---
+
 function getPortfolioStateOnDate(allEvts, targetDate) {
     const state = {};
     const pastEvents = allEvts.filter(e => toDate(e.date) <= toDate(targetDate));
@@ -66,8 +66,7 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
         if (!state[sym]) state[sym] = { lots: [], currency: e.currency || "USD" };
         if (e.eventType === 'transaction') {
             state[sym].currency = e.currency;
-            const fx = 1; 
-            const costPerShareTWD = getTotalCost(e) / (e.quantity || 1) * fx;
+            const costPerShareTWD = getTotalCost(e) / (e.quantity || 1);
             if (e.type === 'buy') {
                 state[sym].lots.push({ quantity: e.quantity, pricePerShareTWD: costPerShareTWD });
             } else {
@@ -171,7 +170,7 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
     const benchmarkPrices = market[upperBenchmarkSymbol]?.prices || {};
     const benchmarkStartPrice = findNearest(benchmarkPrices, startDate);
     if (!benchmarkStartPrice) {
-        log(`TWR_CALC_FAIL: Cannot find start price for benchmark ${upperBenchmarkSymbol} on ${startDate.toISOString().split('T')[0]}.`);
+        log(`TWR_CALC_FAIL: Cannot find start price for benchmark ${upperBenchmarkSymbol}.`);
         return { twrHistory: {}, benchmarkHistory: {} };
     }
     const cashflows = evts.reduce((acc, e) => {
@@ -331,7 +330,7 @@ function calculateCoreMetrics(evts, market, log) {
                 }
                 const costTWD = getTotalCost(e) * (e.currency === "TWD" ? 1 : fx);
                 if (e.type === "buy") {
-                    pf[sym].lots.push({ quantity: e.quantity, pricePerShareOriginal: e.price, pricePerShareTWD: costTWD / e.quantity, date: toDate(e.date) });
+                    pf[sym].lots.push({ quantity: e.quantity, pricePerShareOriginal: e.price, pricePerShareTWD: costTWD / (e.quantity || 1), date: toDate(e.date) });
                 } else {
                     let sellQty = e.quantity;
                     const saleProceedsTWD = costTWD;
@@ -387,10 +386,10 @@ function calculateCoreMetrics(evts, market, log) {
 
 async function fetchAndSaveMarketData(symbol, startDate, log) {
   try {
-    let startDateString = '2000-01-01'; // 預設值
+    let startDateString = '2000-01-01';
     if(startDate) {
         const d = toDate(startDate);
-        d.setMonth(d.getMonth() - 1); // 往前推一個月作為緩衝
+        d.setMonth(d.getMonth() - 1);
         startDateString = d.toISOString().split('T')[0];
     }
     log(`Fetching history for ${symbol} from ${startDateString} from Yahoo Finance...`);
@@ -460,18 +459,10 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
   return marketData;
 }
 
-
 // --- 主計算流程 ---
-async function performRecalculation(uid) {
-    const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
-    const logs = [];
-    const log = msg => {
-        const ts = new Date().toISOString();
-        logs.push(`${ts}: ${msg}`);
-        console.log(`[${uid}] ${ts}: ${msg}`);
-    };
+async function performRecalculation(uid, log) {
     try {
-        log("--- Recalculation Process Start (Robust v10 - Final) ---");
+        log(`--- Recalculation Process Start (User: ${uid}) ---`);
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
         const holdingsSnap = await holdingsRef.get();
@@ -526,17 +517,12 @@ async function performRecalculation(uid) {
         }
         const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
         await histRef.set(historyData);
-        log("--- Recalculation Process Done ---");
+        log(`--- Recalculation Process Done (User: ${uid}) ---`);
     } catch (e) {
-        console.error(`[${uid}] CRITICAL ERROR during calculation:`, e);
-        logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
-    } finally {
-        await logRef.set({ entries: logs });
-        const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-        await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() }).catch(err => log(`Could not delete timestamp: ${err.message}`));
+        log(`CRITICAL ERROR during calculation: ${e.message}\n${e.stack}`);
+        throw e; // Re-throw to make the worker fail and retry
     }
 }
-
 
 // --- 新架構下的觸發器與 Worker ---
 
@@ -544,7 +530,6 @@ const enqueuePortfolioUpdateTask = async (event) => {
     const { uid } = event.params;
     const beforeData = event.data.before.data();
     const afterData = event.data.after.data();
-
     const symbols = new Set();
     if (beforeData) symbols.add(beforeData.symbol.toUpperCase());
     if (afterData) symbols.add(afterData.symbol.toUpperCase());
@@ -583,21 +568,28 @@ exports.enqueueTaskOnTransactionWrite = onDocumentWritten("users/{uid}/transacti
 exports.enqueueTaskOnSplitWrite = onDocumentWritten("users/{uid}/splits/{splitId}", enqueuePortfolioUpdateTask);
 
 exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async (req, res) => {
+    const logRef = db.doc(`logs/worker/${new Date().toISOString()}`);
+    const logs = [];
+    const log = (msg) => {
+        const ts = new Date().toISOString();
+        logs.push(`${ts}: ${msg}`);
+        console.log(msg);
+    };
+
     try {
         const { uid, symbols } = req.body;
         if (!uid || !symbols) {
-            console.error("Invalid payload received by worker");
+            log("Invalid payload received by worker");
             res.status(400).send("Bad Request: Missing uid or symbols.");
             return;
         }
 
-        console.log(`Worker started for user: ${uid}, symbols: ${symbols.join(', ')}`);
+        log(`Worker started for user: ${uid}, symbols: ${symbols.join(', ')}`);
         
         for (const symbol of symbols) {
             const metadataRef = db.collection("stock_metadata").doc(symbol);
             const query = db.collectionGroup("transactions").where("symbol", "==", symbol).orderBy("date", "asc").limit(1);
             const snapshot = await query.get();
-            
             if (snapshot.empty) {
                 await metadataRef.delete();
             } else {
@@ -619,43 +611,41 @@ exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async
             const globalEarliestDate = globalSnapshot.docs[0].data().date;
             await globalMetaRef.set({ earliestTxDate: globalEarliestDate }, { merge: true });
         }
-        console.log(`Metadata updated for user: ${uid}`);
+        log(`Metadata updated for user: ${uid}`);
 
-        await performRecalculation(uid);
-        console.log(`Recalculation finished for user: ${uid}`);
-
+        // 使用傳入的 log 函式
+        await performRecalculation(uid, log);
+        
         res.status(200).send("Task processed successfully.");
 
     } catch (error) {
-        console.error("Worker failed:", error);
+        log(`Worker failed: ${error.message}`);
         res.status(500).send("Task failed and will be retried.");
+    } finally {
+        await logRef.set({ entries: logs });
     }
 });
 
 
-// 其他輕量級觸發器
+// 其他輕量級觸發器 (直接觸發計算，不經過佇列)
 exports.onBenchmarkUpdate = onDocumentWritten("users/{uid}/controls/benchmark_control", async (event) => {
     if (!event.data.after.exists) return null;
     const data = event.data.after.data();
     const { uid } = event.params;
-    const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
+    const logRef = db.doc(`logs/benchmark/${new Date().toISOString()}`);
+    const log = (msg) => console.log(msg);
     
-    await getMarketDataFromDb([], data.symbol, (msg) => console.log(`[Benchmark Pre-fetch] ${msg}`));
-    
-    await holdingsRef.set({
-        benchmarkSymbol: data.symbol,
-        force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-    
-    return event.data.after.ref.delete();
-});
-
-exports.recalculatePortfolio = onDocumentWritten("users/{uid}/user_data/current_holdings", async (event) => {
-    const afterData = event.data.after.data();
-    if (!afterData) return null;
-    
-    if (afterData.force_recalc_timestamp && afterData.force_recalc_timestamp.toMillis() !== event.data.before.data()?.force_recalc_timestamp?.toMillis()) {
-      await performRecalculation(event.params.uid);
+    try {
+        await getMarketDataFromDb([], data.symbol, log);
+        const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
+        await holdingsRef.set({
+            benchmarkSymbol: data.symbol
+        }, { merge: true });
+        await performRecalculation(uid, log);
+    } catch(e) {
+        console.error("onBenchmarkUpdate failed:", e);
+    } finally {
+        await event.data.after.ref.delete();
     }
     return null;
 });
