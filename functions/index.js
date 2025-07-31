@@ -318,7 +318,28 @@ function calculateCoreMetrics(evts, market) {
     return { holdings, totalRealizedPL, xirr, overallReturnRate };
 }
 
-// --- Market Data ---
+async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
+    const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
+    const currencies = [...new Set(txs.map(t => t.currency || "USD"))].filter(c => c !== "TWD");
+    const fxSyms = currencies.map(c => currencyToFx[c]).filter(Boolean);
+    const all = [...new Set([...syms, ...fxSyms, benchmarkSymbol.toUpperCase()])];
+    log(`Required market data for: ${all.join(', ')}`);
+    const out = {};
+    for (const s of all) {
+        if (!s) continue;
+        const col = s.includes("=") ? "exchange_rates" : "price_history";
+        const ref = db.collection(col).doc(s);
+        const doc = await ref.get();
+        if (doc.exists) {
+            out[s] = doc.data();
+        } else {
+            log(`Market data for ${s} not found in DB.`);
+            out[s] = { prices: {}, dividends: {}, splits: {} };
+        }
+    }
+    return out;
+}
+
 async function fetchAndSaveMarketData(symbol, startDate, log) {
     try {
         const queryDate = new Date(startDate);
@@ -341,9 +362,12 @@ async function performRecalculation(uid, log) {
     const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
     const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
     const holdingsSnap = await holdingsRef.get();
-    if (!holdingsSnap.exists) { log("No holdings doc, aborting."); return; }
+    if (!holdingsSnap.exists) {
+        log("No holdings doc, aborting recalculation.");
+        return;
+    }
     const benchmarkSymbol = holdingsSnap.data()?.benchmarkSymbol || 'SPY';
-    log(`Using benchmark: ${benchmarkSymbol}`);
+    log(`Recalculation using benchmark: ${benchmarkSymbol}`);
 
     const [txSnap, splitSnap] = await Promise.all([
         db.collection(`users/${uid}/transactions`).get(),
@@ -359,17 +383,17 @@ async function performRecalculation(uid, log) {
         return;
     }
 
-    const { evts, firstBuyDate } = prepareEvents(txs, splits, {});
+    const market = await getMarketDataFromDb(txs, benchmarkSymbol, log);
+    const { evts, firstBuyDate } = prepareEvents(txs, splits, market);
+
     if (!firstBuyDate) {
-        log("No buy transactions found.");
+        log("No buy transactions found, cannot start calculation.");
         return;
     }
-    const market = await getMarketDataFromDb(txs, benchmarkSymbol, log);
-    const refreshedEvents = prepareEvents(txs, splits, market).evts;
     
-    const portfolioResult = calculateCoreMetrics(refreshedEvents, market);
-    const dailyPortfolioValues = calculateDailyPortfolioValues(refreshedEvents, market, firstBuyDate);
-    const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, refreshedEvents, market, benchmarkSymbol, firstBuyDate, log);
+    const portfolioResult = calculateCoreMetrics(evts, market);
+    const dailyPortfolioValues = calculateDailyPortfolioValues(evts, market, firstBuyDate);
+    const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, firstBuyDate, log);
     
     const dataToWrite = { ...portfolioResult, benchmarkSymbol, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
     const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
@@ -379,14 +403,14 @@ async function performRecalculation(uid, log) {
     log("Recalculation done.");
 }
 
-exports.dataOrchestrator = functions.firestore
+exports.dataOrchestrator = functions.runWith({timeoutSeconds: 120, memory: "512MB"}).firestore
     .document('users/{uid}/transactions/{txId}')
     .onWrite(async (chg, ctx) => {
         const uid = ctx.params.uid;
         const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
-        const log = (msg) => logRef.set({ entries: admin.firestore.FieldValue.arrayUnion(`${new Date().toISOString()}: ${msg}`) }, { merge: true });
+        const log = (msg) => logRef.set({ entries: admin.firestore.FieldValue.arrayUnion(`${new Date().toISOString()}: ORCHESTRATOR: ${msg}`) }, { merge: true });
         
-        log(`Orchestrator triggered by transaction write.`);
+        log(`Triggered by transaction write.`);
         const txsSnap = await db.collection(`users/${uid}/transactions`).get();
         if (txsSnap.empty) {
             await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -400,9 +424,9 @@ exports.dataOrchestrator = functions.firestore
         
         const symbolsInTxs = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
         const symbolsToProcess = [...new Set([...symbolsInTxs, benchmarkSymbol, "TWD=X"])];
-        let wasDataFetched = false;
 
         for (const symbol of symbolsToProcess) {
+            if(!symbol) continue;
             const isForex = symbol.includes("=");
             const collection = isForex ? "exchange_rates" : "price_history";
             const priceDocRef = db.doc(`${collection}/${symbol}`);
@@ -410,30 +434,28 @@ exports.dataOrchestrator = functions.firestore
             const prices = priceDoc.data()?.prices || priceDoc.data()?.rates || {};
             const priceDates = Object.keys(prices);
             
-            const startDateForSymbol = symbol === benchmarkSymbol || isForex 
-                ? globalStartDate
-                : toDate(txs.filter(t => t.symbol.toUpperCase() === symbol).reduce((e, t) => toDate(t.date) < e ? toDate(t.date) : e, new Date()));
+            let startDateForSymbol;
+            if (isForex || symbol.toUpperCase() === benchmarkSymbol.toUpperCase()) {
+                startDateForSymbol = globalStartDate;
+            } else {
+                const relevantTxs = txs.filter(t => t.symbol.toUpperCase() === symbol);
+                startDateForSymbol = toDate(relevantTxs.reduce((e, t) => toDate(t.date) < e ? toDate(t.date) : e, new Date()));
+            }
 
             const requiredStartDate = new Date(startDateForSymbol);
             requiredStartDate.setDate(requiredStartDate.getDate() - 30);
 
-            if (priceDates.length === 0 || new Date(priceDates.sort()[0]) > requiredStartDate) {
+            if (!priceDoc.exists() || priceDates.length === 0 || new Date(priceDates.sort()[0]) > requiredStartDate) {
                 log(`Backfill needed for ${symbol}. Required since ${requiredStartDate.toISOString().split('T')[0]}`);
                 const fullHistory = await fetchAndSaveMarketData(symbol, requiredStartDate, log);
                 if (fullHistory) {
                     await priceDocRef.set(fullHistory);
-                    wasDataFetched = true;
                 }
             }
         }
         
-        if (!wasDataFetched) {
-            log("No backfill needed, triggering recalculation directly.");
-            await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        } else {
-            // Recalculation will be triggered by recalculateOnPriceHistoryWrite
-            log("Backfill completed. Recalculation will be triggered by price_history update.");
-        }
+        log("Orchestration complete. Triggering recalculation.");
+        await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     });
 
 exports.recalculateOnPriceHistoryWrite = functions.firestore
@@ -460,10 +482,10 @@ exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: 
     const afterData = chg.after.data();
     if (!afterData) return null;
     if (beforeData?.force_recalc_timestamp?.isEqual(afterData.force_recalc_timestamp)) return null;
-    if (!afterData.force_recalc_timestamp) return null; // Only run if timestamp is present
+    if (!afterData.force_recalc_timestamp) return null;
 
     const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
-    const log = (msg) => logRef.set({ entries: admin.firestore.FieldValue.arrayUnion(`${new Date().toISOString()}: ${msg}`) }, { merge: true });
+    const log = (msg) => logRef.set({ entries: admin.firestore.FieldValue.arrayUnion(`${new Date().toISOString()}: RECALC: ${msg}`) }, { merge: true });
     
     await performRecalculation(uid, log);
     await chg.after.ref.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() });
