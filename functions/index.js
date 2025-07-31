@@ -427,7 +427,7 @@ async function fetchAndSaveMarketData(symbol, startDate, log) {
         return acc;
     }, {});
     
-    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v8" };
+    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v10" };
     if (symbol.includes("=")) {
       payload.rates = payload.prices;
       delete payload.dividends;
@@ -453,6 +453,11 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
   log(`Data check for symbols: ${allRequiredSymbols.join(', ')}`);
   const marketData = {};
   
+  // 讀取全域最早日期，供公用標的 (匯率, benchmark) 使用
+  const globalMetaRef = db.collection('stock_metadata').doc('--GLOBAL--');
+  const globalMetaDoc = await globalMetaRef.get();
+  const globalEarliestDate = globalMetaDoc.data()?.earliestTxDate;
+
   for (const s of allRequiredSymbols) {
     if (!s) continue;
     const col = s.includes("=") ? "exchange_rates" : "price_history";
@@ -463,9 +468,19 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
       marketData[s] = doc.data();
     } else {
       log(`Data for ${s} not found in Firestore. Fetching now...`);
-      const metadataRef = db.collection('stock_metadata').doc(s);
-      const metadataDoc = await metadataRef.get();
-      const earliestTxDate = metadataDoc.data()?.earliestTxDate;
+      // BUG FIX: 判斷是公用標的還是個股，以讀取不同的 metadata
+      const isGlobalSymbol = s.includes('=') || s === benchmarkSymbol.toUpperCase();
+      let earliestTxDate = null;
+      
+      if (isGlobalSymbol) {
+          earliestTxDate = globalEarliestDate;
+          log(`Symbol ${s} is a global symbol, using global earliest date.`);
+      } else {
+          const metadataRef = db.collection('stock_metadata').doc(s);
+          const metadataDoc = await metadataRef.get();
+          earliestTxDate = metadataDoc.data()?.earliestTxDate;
+          log(`Symbol ${s} is a stock, using its own earliest date.`);
+      }
 
       const fetchedData = await fetchAndSaveMarketData(s, earliestTxDate, log);
       if (fetchedData) {
@@ -491,7 +506,7 @@ async function performRecalculation(uid) {
     };
 
     try {
-        log("--- Recalculation Process Start (Robust v9 - Chained Trigger) ---");
+        log("--- Recalculation Process Start (Robust v10 - Final) ---");
 
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
@@ -507,17 +522,7 @@ async function performRecalculation(uid) {
 
         if (txs.length === 0) {
             log("No transactions found. Clearing user data.");
-            const currentHoldings = holdingsSnap.data()?.holdings || {};
-            const updatePayload = {
-                holdings: {}, 
-                totalRealizedPL: 0, 
-                xirr: null, 
-                overallReturnRate: 0,
-            };
-            for(const symbol in currentHoldings) {
-                updatePayload[`holdings.${symbol}`] = admin.firestore.FieldValue.delete();
-            }
-            await holdingsRef.update(updatePayload);
+            await holdingsRef.update({ holdings: {} }); // 直接清空 holdings map
             await histRef.set({ history: {}, twrHistory: {}, benchmarkHistory: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
             return;
         }
@@ -535,28 +540,37 @@ async function performRecalculation(uid) {
         const dailyPortfolioValues = calculateDailyPortfolioValues(evts, market, firstBuyDate, log);
         const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, firstBuyDate, log);
         
+        // BUG FIX: 採用更穩健的資料庫更新邏輯
         const { holdingsToUpdate, holdingsToDelete } = portfolioResult.holdings;
-        const updatePayload = {
-            totalRealizedPL: portfolioResult.totalRealizedPL,
-            xirr: portfolioResult.xirr,
-            overallReturnRate: portfolioResult.overallReturnRate,
-            benchmarkSymbol: benchmarkSymbol,
-            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-        };
 
-        for (const symbol in holdingsToUpdate) {
-            updatePayload[`holdings.${symbol}`] = holdingsToUpdate[symbol];
+        if (Object.keys(holdingsToUpdate).length === 0) {
+            // 如果最終持股為空，則直接覆寫 holdings 為空 map
+            const finalPayload = {
+                holdings: {},
+                totalRealizedPL: portfolioResult.totalRealizedPL,
+                xirr: portfolioResult.xirr,
+                overallReturnRate: portfolioResult.overallReturnRate,
+                benchmarkSymbol: benchmarkSymbol,
+                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+            };
+            await holdingsRef.update(finalPayload);
+        } else {
+            // 如果仍有持股，則精確更新和刪除
+            const finalPayload = {
+                totalRealizedPL: portfolioResult.totalRealizedPL,
+                xirr: portfolioResult.xirr,
+                overallReturnRate: portfolioResult.overallReturnRate,
+                benchmarkSymbol: benchmarkSymbol,
+                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+            };
+            for (const symbol in holdingsToUpdate) {
+                finalPayload[`holdings.${symbol}`] = holdingsToUpdate[symbol];
+            }
+            for (const symbolToDelete of holdingsToDelete) {
+                finalPayload[`holdings.${symbolToDelete}`] = admin.firestore.FieldValue.delete();
+            }
+            await holdingsRef.update(finalPayload);
         }
-
-        for (const symbolToDelete of holdingsToDelete) {
-            updatePayload[`holdings.${symbolToDelete}`] = admin.firestore.FieldValue.delete();
-        }
-        
-        if (Object.keys(holdingsToUpdate).length === 0 && holdingsToDelete.length > 0) {
-            updatePayload.holdings = {};
-        }
-
-        await holdingsRef.update(updatePayload);
 
         const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
         await histRef.set(historyData);
@@ -608,21 +622,17 @@ exports.onBenchmarkUpdate = functions.firestore
         return chg.after.ref.delete();
     });
 
-// 統一觸發使用者計算的輕量級函式
 const triggerUserRecalculation = (ctx) => {
     return db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
       .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
 }
 
-// ARCHITECTURE FIX: 移除獨立的 recalculateOnTransaction 觸發器，將其邏輯併入 updateStockMetadata
-// exports.recalculateOnTransaction = functions.firestore... (REMOVED)
-
 exports.recalculateOnSplit = functions.firestore
   .document("users/{uid}/splits/{splitId}")
   .onWrite((_, ctx) => triggerUserRecalculation(ctx));
 
-// ARCHITECTURE FIX: 此函式現在是觸發計算的主要入口點
-exports.updateStockMetadataAndTriggerRecalc = functions.firestore
+// BUG FIX: 此函式現在同時維護個股與全域 metadata
+exports.updateMetadataAndTriggerRecalc = functions.firestore
   .document("users/{uid}/transactions/{txId}")
   .onWrite(async (change, context) => {
     const beforeData = change.before.data();
@@ -635,12 +645,7 @@ exports.updateStockMetadataAndTriggerRecalc = functions.firestore
 
     for (const symbol of symbols) {
       const metadataRef = db.collection("stock_metadata").doc(symbol);
-      
-      const query = db.collectionGroup("transactions")
-        .where("symbol", "==", symbol)
-        .orderBy("date", "asc")
-        .limit(1);
-      
+      const query = db.collectionGroup("transactions").where("symbol", "==", symbol).orderBy("date", "asc").limit(1);
       const snapshot = await query.get();
       
       if (snapshot.empty) {
@@ -656,8 +661,20 @@ exports.updateStockMetadataAndTriggerRecalc = functions.firestore
         }, { merge: true });
       }
     }
+
+    // 更新全域 metadata
+    const globalMetaRef = db.collection("stock_metadata").doc("--GLOBAL--");
+    const globalQuery = db.collectionGroup("transactions").orderBy("date", "asc").limit(1);
+    const globalSnapshot = await globalQuery.get();
+    if (globalSnapshot.empty) {
+        console.log("No transactions left in system. Deleting global metadata.");
+        await globalMetaRef.delete();
+    } else {
+        const globalEarliestDate = globalSnapshot.docs[0].data().date;
+        console.log(`Global earliest date is now ${toDate(globalEarliestDate).toISOString()}. Updating global metadata.`);
+        await globalMetaRef.set({ earliestTxDate: globalEarliestDate }, { merge: true });
+    }
     
-    // 在 Metadata 更新完畢後，再觸發該使用者的計算
     console.log(`Metadata updated. Triggering recalculation for user ${context.params.uid}`);
     await triggerUserRecalculation(context);
 
