@@ -30,9 +30,8 @@ def bootstrap_metadata(db):
     all_transactions = db.collection_group("transactions").stream()
     
     earliest_dates = {}
-    global_earliest_date = None
     
-    print("Step 1: Reading all transactions to find the earliest date for each symbol and globally...")
+    print("Step 1: Reading all transactions to find the earliest date for each symbol...")
     count = 0
     for trans in all_transactions:
         data = trans.to_dict()
@@ -45,15 +44,11 @@ def bootstrap_metadata(db):
 
             if symbol not in earliest_dates or date < earliest_dates[symbol]:
                 earliest_dates[symbol] = date
-            
-            if global_earliest_date is None or date < global_earliest_date:
-                global_earliest_date = date
         count += 1
     print(f"Processed {count} transactions. Found {len(earliest_dates)} unique symbols.")
     
     print("Step 2: Writing metadata to Firestore...")
     batch = db.batch()
-    # 寫入個股 metadata
     for symbol, date in earliest_dates.items():
         metadata_ref = db.collection("stock_metadata").document(symbol)
         payload = {
@@ -63,17 +58,7 @@ def bootstrap_metadata(db):
         }
         batch.set(metadata_ref, payload, merge=True)
         print(f"  - Staging update for {symbol} with earliest date {date.strftime('%Y-%m-%d')}")
-    
-    # 寫入全域 metadata
-    if global_earliest_date:
-        global_meta_ref = db.collection("stock_metadata").document("--GLOBAL--")
-        global_payload = {
-            "earliestTxDate": global_earliest_date,
-            "lastUpdated": firestore.SERVER_TIMESTAMP
-        }
-        batch.set(global_meta_ref, global_payload, merge=True)
-        print(f"  - Staging update for --GLOBAL-- with earliest date {global_earliest_date.strftime('%Y-%m-%d')}")
-
+        
     batch.commit()
     print("Bootstrap complete. All metadata has been written.")
 
