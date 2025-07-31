@@ -45,7 +45,6 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
     const state = {};
     const pastEvents = allEvts.filter(e => toDate(e.date) <= toDate(targetDate));
     const futureSplits = allEvts.filter(e => e.eventType === 'split' && toDate(e.date) > toDate(targetDate));
-
     for (const e of pastEvents) {
         const sym = e.symbol.toUpperCase();
         if (!state[sym]) state[sym] = { lots: [], currency: e.currency || "USD" };
@@ -67,10 +66,7 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
                 }
             }
         } else if (e.eventType === 'split') {
-            state[sym].lots.forEach(lot => {
-                lot.quantity *= e.ratio;
-                lot.pricePerShareTWD /= e.ratio;
-            });
+            state[sym].lots.forEach(lot => { lot.quantity *= e.ratio; lot.pricePerShareTWD /= e.ratio; });
         }
     }
     for (const sym in state) {
@@ -318,6 +314,23 @@ function calculateCoreMetrics(evts, market) {
     return { holdings, totalRealizedPL, xirr, overallReturnRate };
 }
 
+async function fetchAndSaveMarketData(symbol, startDate, log) {
+    try {
+        const queryDate = new Date(startDate);
+        queryDate.setDate(queryDate.getDate() - 35);
+        log(`Fetching FULL history for ${symbol} from ${queryDate.toISOString().split('T')[0]}`);
+        const hist = await yahooFinance.historical(symbol, { period1: queryDate, interval: '1d' });
+        const prices = hist.reduce((acc, cur) => { acc[cur.date.toISOString().split("T")[0]] = cur.close; return acc; }, {});
+        const dividends = hist.reduce((acc, cur) => { if(cur.dividends && cur.dividends > 0) acc[cur.date.toISOString().split("T")[0]] = cur.dividends; return acc; }, {});
+        const payload = { prices, dividends, splits: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "on-demand-fetch-v5" };
+        if (symbol.includes("=")) { payload.rates = payload.prices; delete payload.dividends; }
+        return payload;
+    } catch (e) {
+        log(`fetchAndSaveMarketData for ${symbol} ERROR: ${e.message}`);
+        return null;
+    }
+}
+
 async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
     const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
     const currencies = [...new Set(txs.map(t => t.currency || "USD"))].filter(c => c !== "TWD");
@@ -333,28 +346,20 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
         if (doc.exists) {
             out[s] = doc.data();
         } else {
-            log(`Market data for ${s} not found in DB.`);
-            out[s] = { prices: {}, dividends: {}, splits: {} };
+            // [最終修正] 在主計算流程中加入緊急備用抓取，確保冷啟動萬無一失
+            log(`Market data for ${s} not in DB. Performing emergency fetch...`);
+            const globalStartDate = toDate(txs.reduce((earliest, tx) => toDate(tx.date) < earliest ? toDate(tx.date) : earliest, new Date()));
+            const fetched = await fetchAndSaveMarketData(s, globalStartDate, log);
+            if(fetched){
+                await ref.set(fetched);
+                out[s] = fetched;
+            } else {
+                log(`Emergency fetch for ${s} failed. Using empty object.`);
+                out[s] = { prices: {}, dividends: {}, splits: {} };
+            }
         }
     }
     return out;
-}
-
-async function fetchAndSaveMarketData(symbol, startDate, log) {
-    try {
-        const queryDate = new Date(startDate);
-        queryDate.setDate(queryDate.getDate() - 35);
-        log(`Fetching FULL history for ${symbol} from ${queryDate.toISOString().split('T')[0]}`);
-        const hist = await yahooFinance.historical(symbol, { period1: queryDate, interval: '1d' });
-        const prices = hist.reduce((acc, cur) => { acc[cur.date.toISOString().split("T")[0]] = cur.close; return acc; }, {});
-        const dividends = hist.reduce((acc, cur) => { if(cur.dividends && cur.dividends > 0) acc[cur.date.toISOString().split("T")[0]] = cur.dividends; return acc; }, {});
-        const payload = { prices, dividends, splits: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "on-demand-fetch-v4" };
-        if (symbol.includes("=")) { payload.rates = payload.prices; delete payload.dividends; }
-        return payload;
-    } catch (e) {
-        log(`fetchAndSaveMarketData for ${symbol} ERROR: ${e.message}`);
-        return null;
-    }
 }
 
 // --- Main Flow & Triggers ---
@@ -387,7 +392,7 @@ async function performRecalculation(uid, log) {
     const { evts, firstBuyDate } = prepareEvents(txs, splits, market);
 
     if (!firstBuyDate) {
-        log("No buy transactions found, cannot start calculation.");
+        log("No buy transactions found.");
         return;
     }
     
@@ -403,77 +408,11 @@ async function performRecalculation(uid, log) {
     log("Recalculation done.");
 }
 
-exports.dataOrchestrator = functions.runWith({timeoutSeconds: 120, memory: "512MB"}).firestore
-    .document('users/{uid}/transactions/{txId}')
-    .onWrite(async (chg, ctx) => {
-        const uid = ctx.params.uid;
-        const logRef = db.doc(`users/${uid}/user_data/calculation_logs`);
-        const log = (msg) => logRef.set({ entries: admin.firestore.FieldValue.arrayUnion(`${new Date().toISOString()}: ORCHESTRATOR: ${msg}`) }, { merge: true });
-        
-        log(`Triggered by transaction write.`);
-        const txsSnap = await db.collection(`users/${uid}/transactions`).get();
-        if (txsSnap.empty) {
-            await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-            return;
-        }
+exports.recalculateOnTransaction = functions.firestore
+  .document("users/{uid}/transactions/{txId}")
+  .onWrite((_, ctx) => db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
+      .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
 
-        const txs = txsSnap.docs.map(d => d.data());
-        const holdingsSnap = await db.doc(`users/${uid}/user_data/current_holdings`).get();
-        const benchmarkSymbol = holdingsSnap.data()?.benchmarkSymbol || 'SPY';
-        const globalStartDate = toDate(txs.reduce((earliest, tx) => toDate(tx.date) < earliest ? toDate(tx.date) : earliest, new Date()));
-        
-        const symbolsInTxs = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
-        const symbolsToProcess = [...new Set([...symbolsInTxs, benchmarkSymbol, "TWD=X"])];
-
-        for (const symbol of symbolsToProcess) {
-            if(!symbol) continue;
-            const isForex = symbol.includes("=");
-            const collection = isForex ? "exchange_rates" : "price_history";
-            const priceDocRef = db.doc(`${collection}/${symbol}`);
-            const priceDoc = await priceDocRef.get();
-            const prices = priceDoc.data()?.prices || priceDoc.data()?.rates || {};
-            const priceDates = Object.keys(prices);
-            
-            let startDateForSymbol;
-            if (isForex || symbol.toUpperCase() === benchmarkSymbol.toUpperCase()) {
-                startDateForSymbol = globalStartDate;
-            } else {
-                const relevantTxs = txs.filter(t => t.symbol.toUpperCase() === symbol);
-                startDateForSymbol = toDate(relevantTxs.reduce((e, t) => toDate(t.date) < e ? toDate(t.date) : e, new Date()));
-            }
-
-            const requiredStartDate = new Date(startDateForSymbol);
-            requiredStartDate.setDate(requiredStartDate.getDate() - 30);
-
-            if (!priceDoc.exists() || priceDates.length === 0 || new Date(priceDates.sort()[0]) > requiredStartDate) {
-                log(`Backfill needed for ${symbol}. Required since ${requiredStartDate.toISOString().split('T')[0]}`);
-                const fullHistory = await fetchAndSaveMarketData(symbol, requiredStartDate, log);
-                if (fullHistory) {
-                    await priceDocRef.set(fullHistory);
-                }
-            }
-        }
-        
-        log("Orchestration complete. Triggering recalculation.");
-        await db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    });
-
-exports.recalculateOnPriceHistoryWrite = functions.firestore
-    .document('price_history/{symbol}')
-    .onWrite(async (chg, ctx) => {
-        const symbol = ctx.params.symbol.toUpperCase();
-        const holdingsGroup = db.collectionGroup("current_holdings");
-        const query1 = holdingsGroup.where(`holdings.${symbol}.symbol`, "==", symbol).get();
-        const query2 = holdingsGroup.where("benchmarkSymbol", "==", symbol).get();
-        const [holdersSnap, benchmarkUsersSnap] = await Promise.all([query1, query2]);
-        const uids = new Set([...holdersSnap.docs.map(d => d.ref.path.split('/')[1]), ...benchmarkUsersSnap.docs.map(d => d.ref.path.split('/')[1])]);
-        if (uids.size > 0) {
-            console.log(`Price update for ${symbol} affects users: ${[...uids].join(', ')}`);
-            const ts = admin.firestore.FieldValue.serverTimestamp();
-            await Promise.all([...uids].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
-        }
-    });
-    
 exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "2GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
   .onWrite(async (chg, ctx) => {
@@ -508,3 +447,36 @@ exports.recalculateOnSplit = functions.firestore
   .document("users/{uid}/splits/{splitId}")
   .onWrite((_, ctx) => db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
       .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
+
+exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
+  .firestore.document("price_history/{symbol}")
+  .onWrite(async (chg, ctx) => {
+    const s = ctx.params.symbol.toUpperCase();
+    const query1 = db.collectionGroup("transactions").where("symbol", "==", s).get();
+    const holdingsGroup = db.collectionGroup("current_holdings");
+    const query2 = holdingsGroup.where("benchmarkSymbol", "==", s).get();
+    
+    const [txSnap, benchmarkUsersSnap] = await Promise.all([query1, query2]);
+    
+    const usersFromTx = txSnap.docs.map(d => d.ref.path.split("/")[1]);
+    const usersFromBenchmark = benchmarkUsersSnap.docs.map(d => d.ref.path.split("/")[1]);
+    
+    const users = new Set([...usersFromTx, ...usersFromBenchmark].filter(Boolean));
+    if (users.size === 0) return null;
+
+    const ts = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
+    return null;
+  });
+
+exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
+  .firestore.document("exchange_rates/{fxSym}")
+  .onWrite(async (chg, ctx) => {
+    const txSnap = await db.collectionGroup("transactions").get();
+    if (txSnap.empty) return null;
+    const users = new Set(txSnap.docs.map(d => d.ref.path.split("/")[1]).filter(Boolean));
+    if (users.size === 0) return null;
+    const ts = admin.firestore.FieldValue.serverTimestamp();
+    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
+    return null;
+  });
