@@ -22,11 +22,8 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // NEW: 新增 stock_metadata 的安全規則
     match /stock_metadata/{symbol} {
-      // 所有已登入的使用者皆可讀取 (未來可能用於前端顯示)
       allow read: if request.auth != null;
-      // 只允許後端(Cloud Functions)寫入，前端使用者不可修改
       allow write: if false;
     }
 
