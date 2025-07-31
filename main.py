@@ -13,13 +13,11 @@ def initialize_firebase():
         get_app()
     except ValueError:
         try:
-            # Priority for GitHub Actions: read from environment variable
             service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
             cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
             print("Firebase initialized successfully from environment variable.")
         except Exception as e1:
-            # Fallback for local development: try a local file
             print(f"Could not initialize from environment variable ({e1}). Trying local file 'serviceAccountKey.json'...")
             try:
                 cred = credentials.Certificate("serviceAccountKey.json")
@@ -60,25 +58,47 @@ def get_all_symbols_to_update(db):
     return final_list
 
 def fetch_and_update_market_data(db, symbols):
-    all_symbols_to_update = list(set(symbols + ["TWD=X", "SPY"])) # 匯率和通用 benchmark 固定更新
+    # 公用標的固定更新
+    common_symbols = ["TWD=X"]
+    all_symbols_to_update = list(set(symbols + common_symbols))
     
+    # 預先讀取一次 GLOBAL metadata
+    global_earliest_date = None
+    try:
+        global_meta_ref = db.collection("stock_metadata").document("--GLOBAL--").get()
+        if global_meta_ref.exists:
+            global_earliest_date = global_meta_ref.to_dict().get("earliestTxDate")
+    except Exception as e:
+        print(f"Could not read global metadata. Error: {e}")
+
     for symbol in all_symbols_to_update:
         if not symbol: continue
         
         print(f"--- Processing: {symbol} ---")
         
         start_date = None
+        earliest_tx_date = None
+        # 判斷是否為公用標的 (匯率) 或 benchmark (從 symbols 傳入)
+        is_common_symbol = symbol in common_symbols or "=" in symbol
+
         try:
-            # 讀取 metadata 決定起始日期
-            metadata_ref = db.collection("stock_metadata").document(symbol).get()
-            if metadata_ref.exists:
-                earliest_tx_timestamp = metadata_ref.to_dict().get("earliestTxDate")
-                if earliest_tx_timestamp:
-                    # 轉換為 datetime 物件並往前推 30 天作為緩衝
-                    earliest_dt = earliest_tx_timestamp.replace(tzinfo=None)
+            if is_common_symbol:
+                earliest_tx_date = global_earliest_date
+                print(f"Symbol {symbol} is a common symbol, using global earliest date.")
+            else:
+                metadata_ref = db.collection("stock_metadata").document(symbol).get()
+                if metadata_ref.exists:
+                    earliest_tx_date = metadata_ref.to_dict().get("earliestTxDate")
+                    print(f"Found metadata for stock {symbol}.")
+
+            if earliest_tx_date:
+                # Firestore timestamp is timezone-aware, yfinance needs naive datetime
+                if hasattr(earliest_tx_date, 'replace'):
+                    earliest_dt = earliest_tx_date.replace(tzinfo=None)
                     start_dt = earliest_dt - timedelta(days=30)
                     start_date = start_dt.strftime('%Y-%m-%d')
-                    print(f"Found metadata for {symbol}. Fetching data from {start_date}.")
+                    print(f"Fetching data for {symbol} from {start_date}.")
+
         except Exception as e:
             print(f"Could not read metadata for {symbol}, falling back to max period. Error: {e}")
 
@@ -86,7 +106,6 @@ def fetch_and_update_market_data(db, symbols):
         for attempt in range(max_retries):
             try:
                 stock = yf.Ticker(symbol)
-                # 如果有 start_date 則使用，否則抓取全部歷史 (max) 作為備用
                 hist = stock.history(start=start_date, interval="1d", auto_adjust=False, back_adjust=False)
                 
                 if hist.empty:
@@ -107,7 +126,7 @@ def fetch_and_update_market_data(db, symbols):
                     "prices": prices,
                     "dividends": dividends,
                     "lastUpdated": datetime.now().isoformat(),
-                    "dataSource": "yfinance-daily-refresh-v8"
+                    "dataSource": "yfinance-daily-refresh-v10"
                 }
                 if is_forex:
                     payload["rates"] = payload.pop("prices")
@@ -115,7 +134,6 @@ def fetch_and_update_market_data(db, symbols):
                 
                 payload["splits"] = {}
 
-                # 使用 set merge，以合併方式寫入，避免覆蓋掉使用者手動輸入的 splits
                 doc_ref.set(payload, merge=True)
                 print(f"Successfully wrote price/dividend data for {symbol} to Firestore.")
                 break
