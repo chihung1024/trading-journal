@@ -459,6 +459,7 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
   return marketData;
 }
 
+
 // --- 主計算流程 ---
 async function performRecalculation(uid, log) {
     try {
@@ -515,12 +516,12 @@ async function performRecalculation(uid, log) {
             }
             await holdingsRef.update(finalPayload);
         }
-        const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
+        const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
         await histRef.set(historyData);
         log(`--- Recalculation Process Done (User: ${uid}) ---`);
     } catch (e) {
         log(`CRITICAL ERROR during calculation: ${e.message}\n${e.stack}`);
-        throw e; // Re-throw to make the worker fail and retry
+        throw e;
     }
 }
 
@@ -528,11 +529,17 @@ async function performRecalculation(uid, log) {
 
 const enqueuePortfolioUpdateTask = async (event) => {
     const { uid } = event.params;
-    const beforeData = event.data.before.data();
-    const afterData = event.data.after.data();
+    const beforeData = event.data.before?.data();
+    const afterData = event.data.after?.data();
+
     const symbols = new Set();
     if (beforeData) symbols.add(beforeData.symbol.toUpperCase());
     if (afterData) symbols.add(afterData.symbol.toUpperCase());
+    
+    if (symbols.size === 0) {
+        console.log("No symbols found in change event, skipping task enqueue.");
+        return;
+    }
 
     const project = JSON.parse(process.env.FIREBASE_CONFIG).projectId;
     const location = 'us-central1';
@@ -568,7 +575,7 @@ exports.enqueueTaskOnTransactionWrite = onDocumentWritten("users/{uid}/transacti
 exports.enqueueTaskOnSplitWrite = onDocumentWritten("users/{uid}/splits/{splitId}", enqueuePortfolioUpdateTask);
 
 exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async (req, res) => {
-    const logRef = db.doc(`logs/worker/${new Date().toISOString()}`);
+    const logRef = db.collection("worker_logs").doc();
     const logs = [];
     const log = (msg) => {
         const ts = new Date().toISOString();
@@ -613,39 +620,55 @@ exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async
         }
         log(`Metadata updated for user: ${uid}`);
 
-        // 使用傳入的 log 函式
         await performRecalculation(uid, log);
         
+        await logRef.set({ entries: logs, status: "SUCCESS", finishedAt: admin.firestore.FieldValue.serverTimestamp() });
         res.status(200).send("Task processed successfully.");
 
     } catch (error) {
         log(`Worker failed: ${error.message}`);
+        await logRef.set({ entries: logs, status: "ERROR", error: error.message, finishedAt: admin.firestore.FieldValue.serverTimestamp() });
         res.status(500).send("Task failed and will be retried.");
-    } finally {
-        await logRef.set({ entries: logs });
     }
 });
 
 
-// 其他輕量級觸發器 (直接觸發計算，不經過佇列)
+// 其他輕量級觸發器
 exports.onBenchmarkUpdate = onDocumentWritten("users/{uid}/controls/benchmark_control", async (event) => {
     if (!event.data.after.exists) return null;
     const data = event.data.after.data();
     const { uid } = event.params;
-    const logRef = db.doc(`logs/benchmark/${new Date().toISOString()}`);
     const log = (msg) => console.log(msg);
     
     try {
         await getMarketDataFromDb([], data.symbol, log);
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         await holdingsRef.set({
-            benchmarkSymbol: data.symbol
+            benchmarkSymbol: data.symbol,
+            force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
-        await performRecalculation(uid, log);
     } catch(e) {
         console.error("onBenchmarkUpdate failed:", e);
     } finally {
         await event.data.after.ref.delete();
+    }
+    return null;
+});
+
+exports.recalculatePortfolio = onDocumentWritten({document: "users/{uid}/user_data/current_holdings"}, async (event) => {
+    const afterData = event.data.after.data();
+    const beforeData = event.data.before.data();
+    const { uid } = event.params;
+    const log = (msg) => console.log(`[RecalcTrigger][${uid}] ${msg}`);
+
+    if (!afterData) return null;
+    
+    const afterTimestamp = afterData.force_recalc_timestamp;
+    const beforeTimestamp = beforeData?.force_recalc_timestamp;
+
+    if (afterTimestamp && (!beforeTimestamp || afterTimestamp.toMillis() !== beforeTimestamp.toMillis())) {
+      log("force_recalc_timestamp detected. Starting performRecalculation.");
+      await performRecalculation(uid, log);
     }
     return null;
 });
