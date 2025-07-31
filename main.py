@@ -101,16 +101,14 @@ def fetch_and_update_market_data(db, symbols):
                     "prices": prices,
                     "dividends": dividends,
                     "lastUpdated": datetime.now().isoformat(),
-                    "dataSource": "yfinance-daily-full-refresh-v4" # Updated source name
+                    "dataSource": "yfinance-daily-full-refresh-v5"
                 }
                 if is_forex:
                     payload["rates"] = payload.pop("prices")
                     del payload["dividends"]
 
-                # Splits are handled by user manual input, so we provide an empty map here.
                 payload["splits"] = {}
 
-                # Overwrite the document to ensure data is always complete and consistent
                 doc_ref.set(payload)
                 print(f"Successfully wrote full price/dividend data for {symbol} to Firestore.")
                 break
