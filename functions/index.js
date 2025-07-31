@@ -10,6 +10,13 @@ const db = admin.firestore();
 const toDate = v => v.toDate ? v.toDate() : new Date(v);
 const currencyToFx = { USD: "TWD=X", HKD: "HKD=TWD", JPY: "JPY=TWD" };
 
+// NEW: 新增判斷是否為台股的輔助函式
+function isTwStock(symbol) {
+    if (!symbol) return false;
+    const upperSymbol = symbol.toUpperCase();
+    return upperSymbol.endsWith('.TW') || upperSymbol.endsWith('.TWO');
+}
+
 function getTotalCost(tx) {
   return (tx.totalCost !== undefined && tx.totalCost !== null)
     ? Number(tx.totalCost)
@@ -178,7 +185,13 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
         const dateStr = toDate(e.date).toISOString().split('T')[0];
         let flow = 0;
         const currency = e.currency || market[e.symbol.toUpperCase()]?.currency || 'USD';
-        const fx = findFxRate(market, currency, toDate(e.date));
+        
+        let fx;
+        if (e.eventType === 'transaction' && e.exchangeRate && e.currency !== 'TWD') {
+            fx = e.exchangeRate; // BUG FIX: Prioritize manual exchange rate for transactions
+        } else {
+            fx = findFxRate(market, currency, toDate(e.date));
+        }
 
         if (e.eventType === 'transaction') {
             const cost = getTotalCost(e);
@@ -187,7 +200,10 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
             const stateOnDate = getPortfolioStateOnDate(evts, toDate(e.date));
             const shares = stateOnDate[e.symbol.toUpperCase()]?.lots.reduce((sum, lot) => sum + lot.quantity, 0) || 0;
             if (shares > 0) {
-                flow = -1 * e.amount * shares * fx;
+                 // FEATURE: Apply dividend withholding tax
+                const taxRate = isTwStock(e.symbol) ? 0.0 : 0.30;
+                const postTaxAmount = e.amount * (1 - taxRate);
+                flow = -1 * postTaxAmount * shares * fx;
             }
         }
         if (flow !== 0) {
@@ -255,17 +271,27 @@ function calculateFinalHoldings(pf, market) {
 function createCashflowsForXirr(evts, holdings, market) {
     const flows = [];
     evts.filter(e => e.eventType === "transaction").forEach(t => {
-        const fx = findFxRate(market, t.currency, toDate(t.date));
+        // BUG FIX: Prioritize manual exchange rate
+        let fx;
+        if (t.exchangeRate && t.currency !== 'TWD') {
+            fx = t.exchangeRate;
+        } else {
+            fx = findFxRate(market, t.currency, toDate(t.date));
+        }
         const amt = getTotalCost(t) * (t.currency === "TWD" ? 1 : fx);
         flows.push({ date: toDate(t.date), amount: t.type === "buy" ? -amt : amt });
     });
     evts.filter(e => e.eventType === "dividend").forEach(d => {
         const stateOnDate = getPortfolioStateOnDate(evts, toDate(d.date));
-        const currency = stateOnDate[d.symbol.toUpperCase()]?.currency || 'USD';
-        const shares = stateOnDate[d.symbol.toUpperCase()]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
+        const sym = d.symbol.toUpperCase();
+        const currency = stateOnDate[sym]?.currency || 'USD';
+        const shares = stateOnDate[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
         if (shares > 0) {
             const fx = findFxRate(market, currency, toDate(d.date));
-            const amt = d.amount * shares * (currency === "TWD" ? 1 : fx);
+            // FEATURE: Apply dividend withholding tax
+            const taxRate = isTwStock(sym) ? 0.0 : 0.30;
+            const postTaxAmount = d.amount * (1 - taxRate);
+            const amt = postTaxAmount * shares * (currency === "TWD" ? 1 : fx);
             flows.push({ date: toDate(d.date), amount: amt });
         }
     });
@@ -293,11 +319,9 @@ function calculateXIRR(flows) {
     const years = dates.map(d => (d.getTime() - epoch) / (365.25 * 24 * 60 * 60 * 1000));
     
     let guess = 0.1;
-    // 關鍵修正：在迴圈外宣告 npv 變數
     let npv; 
 
     for (let i = 0; i < 50; i++) {
-        // 關鍵修正：在迴圈內賦值，而不是用 const 重新宣告
         npv = amounts.reduce((sum, amount, j) => sum + amount / Math.pow(1 + guess, years[j]), 0);
         
         if (Math.abs(npv) < 1e-6) return guess;
@@ -306,7 +330,6 @@ function calculateXIRR(flows) {
         guess -= npv / derivative;
     }
     
-    // 關鍵修正：現在此處的 npv 是有定義的
     return (npv && Math.abs(npv) < 1e-6) ? guess : null;
 }
 
@@ -318,8 +341,15 @@ function calculateCoreMetrics(evts, market, log) {
         if (!pf[sym]) pf[sym] = { lots: [], currency: e.currency || "USD", realizedPLTWD: 0, realizedCostTWD: 0 };
         switch (e.eventType) {
             case "transaction": {
-                const fx = findFxRate(market, e.currency, toDate(e.date));
+                // BUG FIX: Prioritize manual exchange rate
+                let fx;
+                if (e.exchangeRate && e.currency !== 'TWD') {
+                    fx = e.exchangeRate;
+                } else {
+                    fx = findFxRate(market, e.currency, toDate(e.date));
+                }
                 const costTWD = getTotalCost(e) * (e.currency === "TWD" ? 1 : fx);
+
                 if (e.type === "buy") {
                     pf[sym].lots.push({ quantity: e.quantity, pricePerShareOriginal: e.price, pricePerShareTWD: costTWD / e.quantity, date: toDate(e.date) });
                 } else {
@@ -353,7 +383,10 @@ function calculateCoreMetrics(evts, market, log) {
                 const shares = stateOnDate[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
                 if (shares > 0) {
                     const fx = findFxRate(market, pf[sym].currency, toDate(e.date));
-                    const divTWD = e.amount * shares * (pf[sym].currency === "TWD" ? 1 : fx);
+                    // FEATURE: Apply dividend withholding tax
+                    const taxRate = isTwStock(sym) ? 0.0 : 0.30;
+                    const postTaxAmount = e.amount * (1 - taxRate);
+                    const divTWD = postTaxAmount * shares * (pf[sym].currency === "TWD" ? 1 : fx);
                     totalRealizedPL += divTWD;
                     pf[sym].realizedPLTWD += divTWD;
                 }
@@ -445,7 +478,7 @@ async function performRecalculation(uid) {
     };
 
     try {
-        log("--- Recalculation Process Start (Robust v5) ---");
+        log("--- Recalculation Process Start (Robust v6 - Tax/FX Fix) ---");
 
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
