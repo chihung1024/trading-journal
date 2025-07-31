@@ -1,15 +1,15 @@
 {
   "name": "stock-data-functions",
-  "description": "Cloud Functions for the Stock Data Updater project",
+  "description": "Cloud Functions for Firebase",
   "main": "index.js",
   "dependencies": {
-    "@google-cloud/tasks": "^3.0.0",
-    "firebase-admin": "^11.0.0",
-    "firebase-functions": "^5.1.0",
-    "yahoo-finance2": "^2.3.10"
+    "@google-cloud/tasks": "^5.2.0",
+    "firebase-admin": "^12.1.0",
+    "firebase-functions": "^5.0.1",
+    "yahoo-finance2": "^2.11.3"
   },
   "engines": {
-    "node": "18"
+    "node": "20"
   },
   "private": true
 }
