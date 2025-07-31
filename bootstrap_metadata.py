@@ -9,13 +9,11 @@ def initialize_firebase():
         get_app()
     except ValueError:
         try:
-            # Priority for GitHub Actions: read from environment variable
             service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
             cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
             print("Firebase initialized successfully from environment variable.")
         except Exception as e1:
-            # Fallback for local development: try a local file
             print(f"Could not initialize from environment variable ({e1}). Trying local file 'serviceAccountKey.json'...")
             try:
                 cred = credentials.Certificate("serviceAccountKey.json")
@@ -32,8 +30,9 @@ def bootstrap_metadata(db):
     all_transactions = db.collection_group("transactions").stream()
     
     earliest_dates = {}
+    global_earliest_date = None
     
-    print("Step 1: Reading all transactions to find the earliest date for each symbol...")
+    print("Step 1: Reading all transactions to find the earliest date for each symbol and globally...")
     count = 0
     for trans in all_transactions:
         data = trans.to_dict()
@@ -41,17 +40,20 @@ def bootstrap_metadata(db):
         date = data.get("date")
         if symbol and date:
             symbol = symbol.upper()
-            # Firestore's timestamp needs to be converted to python datetime for comparison
             if hasattr(date, 'to_datetime'):
                 date = date.to_datetime()
 
             if symbol not in earliest_dates or date < earliest_dates[symbol]:
                 earliest_dates[symbol] = date
+            
+            if global_earliest_date is None or date < global_earliest_date:
+                global_earliest_date = date
         count += 1
     print(f"Processed {count} transactions. Found {len(earliest_dates)} unique symbols.")
     
     print("Step 2: Writing metadata to Firestore...")
     batch = db.batch()
+    # 寫入個股 metadata
     for symbol, date in earliest_dates.items():
         metadata_ref = db.collection("stock_metadata").document(symbol)
         payload = {
@@ -61,7 +63,17 @@ def bootstrap_metadata(db):
         }
         batch.set(metadata_ref, payload, merge=True)
         print(f"  - Staging update for {symbol} with earliest date {date.strftime('%Y-%m-%d')}")
-        
+    
+    # 寫入全域 metadata
+    if global_earliest_date:
+        global_meta_ref = db.collection("stock_metadata").document("--GLOBAL--")
+        global_payload = {
+            "earliestTxDate": global_earliest_date,
+            "lastUpdated": firestore.SERVER_TIMESTAMP
+        }
+        batch.set(global_meta_ref, global_payload, merge=True)
+        print(f"  - Staging update for --GLOBAL-- with earliest date {global_earliest_date.strftime('%Y-%m-%d')}")
+
     batch.commit()
     print("Bootstrap complete. All metadata has been written.")
 
