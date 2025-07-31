@@ -291,15 +291,23 @@ function calculateXIRR(flows) {
     const dates = flows.map(f => f.date);
     const epoch = dates[0].getTime();
     const years = dates.map(d => (d.getTime() - epoch) / (365.25 * 24 * 60 * 60 * 1000));
+    
     let guess = 0.1;
+    // 關鍵修正：在迴圈外宣告 npv 變數
+    let npv; 
+
     for (let i = 0; i < 50; i++) {
-        const npv = amounts.reduce((sum, amount, j) => sum + amount / Math.pow(1 + guess, years[j]), 0);
+        // 關鍵修正：在迴圈內賦值，而不是用 const 重新宣告
+        npv = amounts.reduce((sum, amount, j) => sum + amount / Math.pow(1 + guess, years[j]), 0);
+        
         if (Math.abs(npv) < 1e-6) return guess;
         const derivative = amounts.reduce((sum, amount, j) => sum - years[j] * amount / Math.pow(1 + guess, years[j] + 1), 0);
         if (Math.abs(derivative) < 1e-9) break;
         guess -= npv / derivative;
     }
-    return npv < 1e-6 ? guess : null;
+    
+    // 關鍵修正：現在此處的 npv 是有定義的
+    return (npv && Math.abs(npv) < 1e-6) ? guess : null;
 }
 
 function calculateCoreMetrics(evts, market, log) {
@@ -412,13 +420,11 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
     if (doc.exists) {
       marketData[s] = doc.data();
     } else {
-      // 如果數據不存在，立即回填
       log(`Data for ${s} not found in Firestore. Fetching now...`);
       const fetchedData = await fetchAndSaveMarketData(s, log);
       if (fetchedData) {
         marketData[s] = fetchedData;
       } else {
-        // 如果回填失敗，拋出錯誤以中止整個計算
         throw new Error(`Failed to fetch critical market data for ${s}. Aborting calculation.`);
       }
     }
@@ -464,7 +470,6 @@ async function performRecalculation(uid) {
             return;
         }
 
-        // 關鍵步驟：在計算前，確保所有數據都已存在，若不存在則會在此步驟中同步等待回填完成
         const market = await getMarketDataFromDb(txs, benchmarkSymbol, log);
         
         const { evts, firstBuyDate } = prepareEvents(txs, splits, market);
@@ -490,7 +495,6 @@ async function performRecalculation(uid) {
         logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
     } finally {
         await logRef.set({ entries: logs });
-        // 清除觸發旗標
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() }).catch(err => log(`Could not delete timestamp: ${err.message}`));
     }
@@ -505,7 +509,6 @@ exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: 
     const afterData = chg.after.data();
     if (!afterData) return null;
     
-    // 只有在 force_recalc_timestamp 欄位被新增或更新時才觸發
     if (afterData.force_recalc_timestamp && afterData.force_recalc_timestamp !== beforeData?.force_recalc_timestamp) {
       await performRecalculation(ctx.params.uid);
     }
@@ -522,7 +525,6 @@ exports.onBenchmarkUpdate = functions.firestore
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         console.log(`[${uid}] User requested benchmark update to ${data.symbol}.`);
         
-        // 關鍵修正：在觸發計算前，先確保新的 benchmark 數據已存在
         await getMarketDataFromDb([], data.symbol, (msg) => console.log(`[Benchmark Pre-fetch] ${msg}`));
         
         console.log(`[${uid}] Pre-fetch for ${data.symbol} complete. Now triggering recalculation.`);
@@ -534,7 +536,6 @@ exports.onBenchmarkUpdate = functions.firestore
         return chg.after.ref.delete();
     });
 
-// 統一的輕量級觸發器
 const triggerRecalculation = (ctx) => {
     return db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
       .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
@@ -548,7 +549,6 @@ exports.recalculateOnSplit = functions.firestore
   .document("users/{uid}/splits/{splitId}")
   .onWrite((_, ctx) => triggerRecalculation(ctx));
 
-// 全域價格更新觸發器 (當排程更新價格後，通知相關用戶重新計算)
 exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
   .firestore.document("price_history/{symbol}")
   .onWrite(async (chg, ctx) => {
