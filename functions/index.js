@@ -386,14 +386,14 @@ function calculateCoreMetrics(evts, market, log) {
 
 async function fetchAndSaveMarketData(symbol, startDate, log) {
   try {
-    let startDateString = '2000-01-01';
+    let startDateString = null; // 預設抓取 MAX
     if(startDate) {
         const d = toDate(startDate);
         d.setMonth(d.getMonth() - 1);
         startDateString = d.toISOString().split('T')[0];
     }
-    log(`Fetching history for ${symbol} from ${startDateString} from Yahoo Finance...`);
-    const hist = await yahooFinance.historical(symbol, { period1: startDateString, interval: '1d' });
+    log(`Fetching history for ${symbol} from ${startDateString || 'MAX'} from Yahoo Finance...`);
+    const hist = await yahooFinance.historical(symbol, { period1: startDateString || '2000-01-01', interval: '1d' });
     const prices = hist.reduce((acc, cur) => {
         if (cur.close) acc[cur.date.toISOString().split("T")[0]] = cur.close;
         return acc;
@@ -402,7 +402,7 @@ async function fetchAndSaveMarketData(symbol, startDate, log) {
         if(cur.dividends && cur.dividends > 0) acc[cur.date.toISOString().split("T")[0]] = cur.dividends;
         return acc;
     }, {});
-    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v10" };
+    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-final" };
     if (symbol.includes("=")) {
       payload.rates = payload.prices;
       delete payload.dividends;
@@ -424,9 +424,6 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
   const allRequiredSymbols = [...new Set([...syms, ...fxSyms, benchmarkSymbol.toUpperCase()])];
   log(`Data check for symbols: ${allRequiredSymbols.join(', ')}`);
   const marketData = {};
-  const globalMetaRef = db.collection('stock_metadata').doc('--GLOBAL--');
-  const globalMetaDoc = await globalMetaRef.get();
-  const globalEarliestDate = globalMetaDoc.data()?.earliestTxDate;
   for (const s of allRequiredSymbols) {
     if (!s) continue;
     const col = s.includes("=") ? "exchange_rates" : "price_history";
@@ -438,20 +435,19 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
       log(`Data for ${s} not found in Firestore. Fetching now...`);
       const isGlobalSymbol = s.includes('=') || s === benchmarkSymbol.toUpperCase();
       let earliestTxDate = null;
-      if (isGlobalSymbol) {
-          earliestTxDate = globalEarliestDate;
-          log(`Symbol ${s} is a global symbol, using global earliest date.`);
-      } else {
+      if (!isGlobalSymbol) {
           const metadataRef = db.collection('stock_metadata').doc(s);
           const metadataDoc = await metadataRef.get();
           earliestTxDate = metadataDoc.data()?.earliestTxDate;
           log(`Symbol ${s} is a stock, using its own earliest date.`);
+      } else {
+          log(`Symbol ${s} is a global symbol, fetching MAX history for robustness.`);
       }
       const fetchedData = await fetchAndSaveMarketData(s, earliestTxDate, log);
       if (fetchedData) {
         marketData[s] = fetchedData;
       } else {
-        throw new Error(`Failed to fetch critical market data for ${s}. Aborting calculation.`);
+        throw new Error(`Failed to fetch critical market data for ${s}.`);
       }
     }
   }
@@ -531,23 +527,19 @@ const enqueuePortfolioUpdateTask = async (event) => {
     const { uid } = event.params;
     const beforeData = event.data.before?.data();
     const afterData = event.data.after?.data();
-
     const symbols = new Set();
     if (beforeData) symbols.add(beforeData.symbol.toUpperCase());
     if (afterData) symbols.add(afterData.symbol.toUpperCase());
-    
     if (symbols.size === 0) {
         console.log("No symbols found in change event, skipping task enqueue.");
         return;
     }
-
     const project = JSON.parse(process.env.FIREBASE_CONFIG).projectId;
     const location = 'us-central1';
     const queue = 'portfolio-recalc-queue';
     const queuePath = tasksClient.queuePath(project, location, queue);
     const url = `https://${location}-${project}.cloudfunctions.net/portfolioWorker`;
     const taskPayload = { uid, symbols: Array.from(symbols) };
-
     const task = {
       httpRequest: {
         httpMethod: 'POST',
@@ -562,7 +554,6 @@ const enqueuePortfolioUpdateTask = async (event) => {
         seconds: Date.now() / 1000 + 5,
       },
     };
-
     try {
         console.log(`Enqueuing task for user: ${uid}, symbols: ${Array.from(symbols).join(', ')}`);
         await tasksClient.createTask({ parent: queuePath, task });
@@ -582,7 +573,6 @@ exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async
         logs.push(`${ts}: ${msg}`);
         console.log(msg);
     };
-
     try {
         const { uid, symbols } = req.body;
         if (!uid || !symbols) {
@@ -590,9 +580,7 @@ exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async
             res.status(400).send("Bad Request: Missing uid or symbols.");
             return;
         }
-
         log(`Worker started for user: ${uid}, symbols: ${symbols.join(', ')}`);
-        
         for (const symbol of symbols) {
             const metadataRef = db.collection("stock_metadata").doc(symbol);
             const query = db.collectionGroup("transactions").where("symbol", "==", symbol).orderBy("date", "asc").limit(1);
@@ -608,23 +596,9 @@ exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async
                 }, { merge: true });
             }
         }
-        
-        const globalMetaRef = db.collection("stock_metadata").doc("--GLOBAL--");
-        const globalQuery = db.collectionGroup("transactions").orderBy("date", "asc").limit(1);
-        const globalSnapshot = await globalQuery.get();
-        if (globalSnapshot.empty) {
-            await globalMetaRef.delete();
-        } else {
-            const globalEarliestDate = globalSnapshot.docs[0].data().date;
-            await globalMetaRef.set({ earliestTxDate: globalEarliestDate }, { merge: true });
-        }
-        log(`Metadata updated for user: ${uid}`);
-
         await performRecalculation(uid, log);
-        
         await logRef.set({ entries: logs, status: "SUCCESS", finishedAt: admin.firestore.FieldValue.serverTimestamp() });
         res.status(200).send("Task processed successfully.");
-
     } catch (error) {
         log(`Worker failed: ${error.message}`);
         await logRef.set({ entries: logs, status: "ERROR", error: error.message, finishedAt: admin.firestore.FieldValue.serverTimestamp() });
@@ -632,14 +606,12 @@ exports.portfolioWorker = onRequest({timeoutSeconds: 540, memory: "1GiB"}, async
     }
 });
 
-
 // 其他輕量級觸發器
 exports.onBenchmarkUpdate = onDocumentWritten("users/{uid}/controls/benchmark_control", async (event) => {
     if (!event.data.after.exists) return null;
     const data = event.data.after.data();
     const { uid } = event.params;
     const log = (msg) => console.log(msg);
-    
     try {
         await getMarketDataFromDb([], data.symbol, log);
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
@@ -660,12 +632,9 @@ exports.recalculatePortfolio = onDocumentWritten({document: "users/{uid}/user_da
     const beforeData = event.data.before.data();
     const { uid } = event.params;
     const log = (msg) => console.log(`[RecalcTrigger][${uid}] ${msg}`);
-
     if (!afterData) return null;
-    
     const afterTimestamp = afterData.force_recalc_timestamp;
     const beforeTimestamp = beforeData?.force_recalc_timestamp;
-
     if (afterTimestamp && (!beforeTimestamp || afterTimestamp.toMillis() !== beforeTimestamp.toMillis())) {
       log("force_recalc_timestamp detected. Starting performRecalculation.");
       await performRecalculation(uid, log);
