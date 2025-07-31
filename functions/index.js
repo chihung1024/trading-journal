@@ -237,15 +237,16 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
     return { twrHistory, benchmarkHistory };
 }
 
-// BUG FIX: 修正 calculateFinalHoldings 以正確刪除零持股股票
+// FINAL FIX: 修改此函式以區分要更新和要刪除的持股
 function calculateFinalHoldings(pf, market) {
-  const out = {};
+  const holdingsToUpdate = {};
+  const holdingsToDelete = [];
   const today = new Date();
+
   for (const sym in pf) {
     const h = pf[sym];
     const qty = h.lots.reduce((s, l) => s + l.quantity, 0);
     
-    // 如果計算後股數大於零，則正常處理
     if (qty > 1e-9) {
         const totCostTWD = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareTWD, 0);
         const totCostOrg = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareOriginal, 0);
@@ -258,7 +259,7 @@ function calculateFinalHoldings(pf, market) {
         const totalRet = unreal + h.realizedPLTWD;
         const rrCurrent = totCostTWD > 0 ? (unreal / totCostTWD) * 100 : 0;
         const rrTotal = invested > 0 ? (totalRet / invested) * 100 : 0;
-        out[sym] = {
+        holdingsToUpdate[sym] = {
           symbol: sym, quantity: qty, currency: h.currency,
           avgCostOriginal: totCostOrg > 0 ? totCostOrg / qty : 0, totalCostTWD: totCostTWD, investedCostTWD: invested,
           currentPriceOriginal: curPrice ?? null, marketValueTWD: mktVal,
@@ -266,11 +267,11 @@ function calculateFinalHoldings(pf, market) {
           returnRateCurrent: rrCurrent, returnRateTotal: rrTotal, returnRate: rrCurrent
         };
     } else {
-        // 如果股數為零，則明確地設定為刪除指令
-        out[sym] = admin.firestore.FieldValue.delete();
+        // 如果股數為零，則將其代碼加入待刪除清單
+        holdingsToDelete.push(sym);
     }
   }
-  return out;
+  return { holdingsToUpdate, holdingsToDelete };
 }
 
 function createCashflowsForXirr(evts, holdings, market) {
@@ -395,14 +396,14 @@ function calculateCoreMetrics(evts, market, log) {
             }
         }
     }
-    const holdings = calculateFinalHoldings(pf, market);
-    const xirrFlows = createCashflowsForXirr(evts, holdings, market);
+    const { holdingsToUpdate, holdingsToDelete } = calculateFinalHoldings(pf, market);
+    const xirrFlows = createCashflowsForXirr(evts, holdingsToUpdate, market);
     const xirr = calculateXIRR(xirrFlows);
-    const totalUnrealizedPL = Object.values(holdings).reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
-    const totalInvestedCost = Object.values(holdings).reduce((sum, h) => sum + h.totalCostTWD, 0) + Object.values(pf).reduce((sum, p) => sum + p.realizedCostTWD, 0);
+    const totalUnrealizedPL = Object.values(holdingsToUpdate).reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
+    const totalInvestedCost = Object.values(holdingsToUpdate).reduce((sum, h) => sum + h.totalCostTWD, 0) + Object.values(pf).reduce((sum, p) => sum + p.realizedCostTWD, 0);
     const totalReturnValue = totalRealizedPL + totalUnrealizedPL;
     const overallReturnRate = totalInvestedCost > 0 ? (totalReturnValue / totalInvestedCost) * 100 : 0;
-    return { holdings, totalRealizedPL, xirr, overallReturnRate };
+    return { holdings: { holdingsToUpdate, holdingsToDelete }, totalRealizedPL, xirr, overallReturnRate };
 }
 
 // --- 資料庫與網路請求 ---
@@ -479,7 +480,7 @@ async function performRecalculation(uid) {
     };
 
     try {
-        log("--- Recalculation Process Start (Robust v6 - Tax/FX Fix) ---");
+        log("--- Recalculation Process Start (Robust v7 - Update/Delete Fix) ---");
 
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
@@ -495,11 +496,18 @@ async function performRecalculation(uid) {
 
         if (txs.length === 0) {
             log("No transactions found. Clearing user data.");
-            await holdingsRef.set({
-                holdings: {}, totalRealizedPL: 0, xirr: null, overallReturnRate: 0,
-                benchmarkSymbol: benchmarkSymbol,
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            }, { merge: true }); // Use merge to avoid overwriting benchmark symbol if it exists
+            const currentHoldings = holdingsSnap.data()?.holdings || {};
+            const updatePayload = {
+                holdings: {}, 
+                totalRealizedPL: 0, 
+                xirr: null, 
+                overallReturnRate: 0,
+            };
+            // 刪除所有現有的持股
+            for(const symbol in currentHoldings) {
+                updatePayload[`holdings.${symbol}`] = admin.firestore.FieldValue.delete();
+            }
+            await holdingsRef.update(updatePayload);
             await histRef.set({ history: {}, twrHistory: {}, benchmarkHistory: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
             return;
         }
@@ -517,9 +525,26 @@ async function performRecalculation(uid) {
         const dailyPortfolioValues = calculateDailyPortfolioValues(evts, market, firstBuyDate, log);
         const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, firstBuyDate, log);
         
-        const dataToWrite = { ...portfolioResult, benchmarkSymbol, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
-        
-        await holdingsRef.set(dataToWrite, { merge: true });
+        // FINAL FIX: 使用 update() 和 dot notation 來進行精確的更新與刪除
+        const { holdingsToUpdate, holdingsToDelete } = portfolioResult.holdings;
+        const updatePayload = {
+            holdings: holdingsToUpdate,
+            totalRealizedPL: portfolioResult.totalRealizedPL,
+            xirr: portfolioResult.xirr,
+            overallReturnRate: portfolioResult.overallReturnRate,
+            benchmarkSymbol: benchmarkSymbol,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        };
+
+        // 將待刪除的持股加入 payload
+        for (const symbolToDelete of holdingsToDelete) {
+            updatePayload[`holdings.${symbolToDelete}`] = admin.firestore.FieldValue.delete();
+        }
+
+        // 執行一次精確的更新
+        await holdingsRef.update(updatePayload);
+
+        const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
         await histRef.set(historyData);
         
         log("--- Recalculation Process Done ---");
