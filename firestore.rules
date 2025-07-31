@@ -22,7 +22,7 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
     }
     
-    // [新增] 允許使用者寫入 controls 文件夾，以觸發 benchmark 更新
+    // 允許使用者寫入 controls 文件夾，以觸發 benchmark 更新
     match /users/{userId}/controls/{controlId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
     }
