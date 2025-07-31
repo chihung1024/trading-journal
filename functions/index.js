@@ -406,7 +406,6 @@ function calculateCoreMetrics(evts, market, log) {
 
 // --- 資料庫與網路請求 (已整合 Metadata) ---
 
-// MODIFIED: fetchAndSaveMarketData 現在接受一個起始日期
 async function fetchAndSaveMarketData(symbol, startDate, log) {
   try {
     let startDateString = '2000-01-01'; // 預設值
@@ -435,7 +434,6 @@ async function fetchAndSaveMarketData(symbol, startDate, log) {
     }
 
     const col = symbol.includes("=") ? "exchange_rates" : "price_history";
-    // 使用 set merge，以合併方式寫入，避免覆蓋掉使用者手動輸入的 splits
     await db.collection(col).doc(symbol).set(payload, { merge: true });
     log(`Successfully fetched and wrote history for ${symbol}.`);
     return payload;
@@ -446,7 +444,6 @@ async function fetchAndSaveMarketData(symbol, startDate, log) {
   }
 }
 
-// MODIFIED: getMarketDataFromDb 現在會讀取 metadata
 async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
   const syms = [...new Set(txs.map(t => t.symbol.toUpperCase()))];
   const currencies = [...new Set(txs.map(t => t.currency || "USD"))].filter(c => c !== "TWD");
@@ -466,7 +463,6 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
       marketData[s] = doc.data();
     } else {
       log(`Data for ${s} not found in Firestore. Fetching now...`);
-      // 讀取 metadata 決定起始日期
       const metadataRef = db.collection('stock_metadata').doc(s);
       const metadataDoc = await metadataRef.get();
       const earliestTxDate = metadataDoc.data()?.earliestTxDate;
@@ -495,7 +491,7 @@ async function performRecalculation(uid) {
     };
 
     try {
-        log("--- Recalculation Process Start (Robust v8 - Metadata Final) ---");
+        log("--- Recalculation Process Start (Robust v9 - Chained Trigger) ---");
 
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
@@ -518,7 +514,6 @@ async function performRecalculation(uid) {
                 xirr: null, 
                 overallReturnRate: 0,
             };
-            // 刪除所有現有的持股
             for(const symbol in currentHoldings) {
                 updatePayload[`holdings.${symbol}`] = admin.firestore.FieldValue.delete();
             }
@@ -619,16 +614,15 @@ const triggerUserRecalculation = (ctx) => {
       .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
 }
 
-exports.recalculateOnTransaction = functions.firestore
-  .document("users/{uid}/transactions/{txId}")
-  .onWrite((_, ctx) => triggerUserRecalculation(ctx));
+// ARCHITECTURE FIX: 移除獨立的 recalculateOnTransaction 觸發器，將其邏輯併入 updateStockMetadata
+// exports.recalculateOnTransaction = functions.firestore... (REMOVED)
 
 exports.recalculateOnSplit = functions.firestore
   .document("users/{uid}/splits/{splitId}")
   .onWrite((_, ctx) => triggerUserRecalculation(ctx));
 
-// NEW: 維護 stock_metadata 的新觸發器
-exports.updateStockMetadata = functions.firestore
+// ARCHITECTURE FIX: 此函式現在是觸發計算的主要入口點
+exports.updateStockMetadataAndTriggerRecalc = functions.firestore
   .document("users/{uid}/transactions/{txId}")
   .onWrite(async (change, context) => {
     const beforeData = change.before.data();
@@ -662,6 +656,11 @@ exports.updateStockMetadata = functions.firestore
         }, { merge: true });
       }
     }
+    
+    // 在 Metadata 更新完畢後，再觸發該使用者的計算
+    console.log(`Metadata updated. Triggering recalculation for user ${context.params.uid}`);
+    await triggerUserRecalculation(context);
+
     return null;
   });
 
