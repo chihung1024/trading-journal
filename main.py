@@ -3,7 +3,7 @@ import yfinance as yf
 import firebase_admin
 from firebase_admin import credentials, firestore, get_app
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import time
 
@@ -35,7 +35,6 @@ def get_all_symbols_to_update(db):
     """Gathers all unique symbols from user transactions and benchmark settings."""
     all_symbols = set()
     
-    # 1. Get symbols from all user transactions
     try:
         transactions_group = db.collection_group("transactions")
         for trans_doc in transactions_group.stream():
@@ -46,7 +45,6 @@ def get_all_symbols_to_update(db):
     except Exception as e:
         print(f"Warning: Could not read transactions. Error: {e}")
         
-    # 2. Get benchmark symbols from all user holdings
     try:
         holdings_group = db.collection_group("current_holdings")
         for holding_doc in holdings_group.stream():
@@ -62,31 +60,39 @@ def get_all_symbols_to_update(db):
     return final_list
 
 def fetch_and_update_market_data(db, symbols):
-    """
-    Fetches market data for a list of symbols with a retry mechanism
-    and overwrites the data in Firestore for maximum robustness.
-    """
-    # Always include the TWD exchange rate in the update list
-    all_symbols_to_update = list(set(symbols + ["TWD=X"]))
+    all_symbols_to_update = list(set(symbols + ["TWD=X", "SPY"])) # 匯率和通用 benchmark 固定更新
     
     for symbol in all_symbols_to_update:
         if not symbol: continue
         
         print(f"--- Processing: {symbol} ---")
         
-        # Retry mechanism for fetching data
+        start_date = None
+        try:
+            # 讀取 metadata 決定起始日期
+            metadata_ref = db.collection("stock_metadata").document(symbol).get()
+            if metadata_ref.exists:
+                earliest_tx_timestamp = metadata_ref.to_dict().get("earliestTxDate")
+                if earliest_tx_timestamp:
+                    # 轉換為 datetime 物件並往前推 30 天作為緩衝
+                    earliest_dt = earliest_tx_timestamp.replace(tzinfo=None)
+                    start_dt = earliest_dt - timedelta(days=30)
+                    start_date = start_dt.strftime('%Y-%m-%d')
+                    print(f"Found metadata for {symbol}. Fetching data from {start_date}.")
+        except Exception as e:
+            print(f"Could not read metadata for {symbol}, falling back to max period. Error: {e}")
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 stock = yf.Ticker(symbol)
-                # Fetch full history to ensure data integrity and self-heal any gaps
-                hist = stock.history(period="max", interval="1d", auto_adjust=False, back_adjust=False)
+                # 如果有 start_date 則使用，否則抓取全部歷史 (max) 作為備用
+                hist = stock.history(start=start_date, interval="1d", auto_adjust=False, back_adjust=False)
                 
                 if hist.empty:
-                    print(f"Warning: No history found for {symbol}. It might be a delisted or invalid ticker.")
-                    break # No point in retrying if history is empty
+                    print(f"Warning: No history found for {symbol}.")
+                    break
 
-                # If successful, break the retry loop
                 print(f"Successfully fetched data for {symbol} on attempt {attempt + 1}.")
                 
                 prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if pd.notna(val)}
@@ -101,16 +107,17 @@ def fetch_and_update_market_data(db, symbols):
                     "prices": prices,
                     "dividends": dividends,
                     "lastUpdated": datetime.now().isoformat(),
-                    "dataSource": "yfinance-daily-full-refresh-v5"
+                    "dataSource": "yfinance-daily-refresh-v8"
                 }
                 if is_forex:
                     payload["rates"] = payload.pop("prices")
                     del payload["dividends"]
-
+                
                 payload["splits"] = {}
 
-                doc_ref.set(payload)
-                print(f"Successfully wrote full price/dividend data for {symbol} to Firestore.")
+                # 使用 set merge，以合併方式寫入，避免覆蓋掉使用者手動輸入的 splits
+                doc_ref.set(payload, merge=True)
+                print(f"Successfully wrote price/dividend data for {symbol} to Firestore.")
                 break
 
             except Exception as e:
