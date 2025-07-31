@@ -2,9 +2,11 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const yahooFinance = require("yahoo-finance2").default;
+const { CloudTasksClient } = require("@google-cloud/tasks");
 
 admin.initializeApp();
 const db = admin.firestore();
+const tasksClient = new CloudTasksClient();
 
 // --- 基礎工具函式 ---
 const toDate = v => v.toDate ? v.toDate() : new Date(v);
@@ -453,7 +455,6 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
   log(`Data check for symbols: ${allRequiredSymbols.join(', ')}`);
   const marketData = {};
   
-  // 讀取全域最早日期，供公用標的 (匯率, benchmark) 使用
   const globalMetaRef = db.collection('stock_metadata').doc('--GLOBAL--');
   const globalMetaDoc = await globalMetaRef.get();
   const globalEarliestDate = globalMetaDoc.data()?.earliestTxDate;
@@ -468,7 +469,6 @@ async function getMarketDataFromDb(txs, benchmarkSymbol, log) {
       marketData[s] = doc.data();
     } else {
       log(`Data for ${s} not found in Firestore. Fetching now...`);
-      // BUG FIX: 判斷是公用標的還是個股，以讀取不同的 metadata
       const isGlobalSymbol = s.includes('=') || s === benchmarkSymbol.toUpperCase();
       let earliestTxDate = null;
       
@@ -522,7 +522,7 @@ async function performRecalculation(uid) {
 
         if (txs.length === 0) {
             log("No transactions found. Clearing user data.");
-            await holdingsRef.update({ holdings: {} }); // 直接清空 holdings map
+            await holdingsRef.update({ holdings: {} });
             await histRef.set({ history: {}, twrHistory: {}, benchmarkHistory: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
             return;
         }
@@ -540,11 +540,9 @@ async function performRecalculation(uid) {
         const dailyPortfolioValues = calculateDailyPortfolioValues(evts, market, firstBuyDate, log);
         const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, firstBuyDate, log);
         
-        // BUG FIX: 採用更穩健的資料庫更新邏輯
         const { holdingsToUpdate, holdingsToDelete } = portfolioResult.holdings;
 
         if (Object.keys(holdingsToUpdate).length === 0) {
-            // 如果最終持股為空，則直接覆寫 holdings 為空 map
             const finalPayload = {
                 holdings: {},
                 totalRealizedPL: portfolioResult.totalRealizedPL,
@@ -555,7 +553,6 @@ async function performRecalculation(uid) {
             };
             await holdingsRef.update(finalPayload);
         } else {
-            // 如果仍有持股，則精確更新和刪除
             const finalPayload = {
                 totalRealizedPL: portfolioResult.totalRealizedPL,
                 xirr: portfolioResult.xirr,
@@ -587,21 +584,121 @@ async function performRecalculation(uid) {
 }
 
 
-// --- Triggers ---
-exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
-  .firestore.document("users/{uid}/user_data/current_holdings")
-  .onWrite(async (chg, ctx) => {
-    const beforeData = chg.before.data();
-    const afterData = chg.after.data();
-    if (!afterData) return null;
+// --- 新架構下的觸發器與 Worker ---
+
+/**
+ * 步驟 1: 極輕量的 Firestore 觸發器，僅負責將任務加入佇列
+ */
+const enqueuePortfolioUpdateTask = async (change, context) => {
+    const { uid } = context.params;
+    const symbols = new Set();
+    if (change.before.exists) symbols.add(change.before.data().symbol.toUpperCase());
+    if (change.after.exists) symbols.add(change.after.data().symbol.toUpperCase());
+
+    const project = JSON.parse(process.env.FIREBASE_CONFIG).projectId;
+    const location = 'us-central1'; // Or your function's region
+    const queue = 'portfolio-recalc-queue';
+
+    const queuePath = tasksClient.queuePath(project, location, queue);
     
-    if (afterData.force_recalc_timestamp && afterData.force_recalc_timestamp !== beforeData?.force_recalc_timestamp) {
-      await performRecalculation(ctx.params.uid);
+    // Programmatically construct the URL for the worker function
+    const url = `https://${location}-${project}.cloudfunctions.net/portfolioWorker`;
+
+    const taskPayload = { uid, symbols: Array.from(symbols) };
+
+    const task = {
+      httpRequest: {
+        httpMethod: 'POST',
+        url,
+        body: Buffer.from(JSON.stringify(taskPayload)).toString('base64'),
+        headers: { 'Content-Type': 'application/json' },
+        oidcToken: {
+          serviceAccountEmail: `${project}@appspot.gserviceaccount.com`,
+        },
+      },
+      scheduleTime: {
+        seconds: Date.now() / 1000 + 5, // 5秒後執行
+      },
+    };
+
+    try {
+        console.log(`Enqueuing task for user: ${uid}, symbols: ${Array.from(symbols).join(', ')}`);
+        await tasksClient.createTask({ parent: queuePath, task });
+    } catch (error) {
+        console.error("Failed to enqueue task:", error);
     }
-    
-    return null;
-  });
-  
+};
+
+exports.enqueueTaskOnTransactionWrite = functions.firestore
+  .document("users/{uid}/transactions/{txId}")
+  .onWrite(enqueuePortfolioUpdateTask);
+
+exports.enqueueTaskOnSplitWrite = functions.firestore
+  .document("users/{uid}/splits/{splitId}")
+  .onWrite(enqueuePortfolioUpdateTask);
+
+
+/**
+ * 步驟 2: HTTP 觸發的 Worker 函式，由 Cloud Tasks 呼叫
+ */
+exports.portfolioWorker = functions.runWith({ timeoutSeconds: 540, memory: "1GB" })
+  .https.onRequest(async (req, res) => {
+    try {
+        // Verify OIDC token to ensure the request is from Cloud Tasks
+        // In a real production app, you would add a token verification step here.
+
+        const { uid, symbols } = req.body;
+        if (!uid || !symbols) {
+            console.error("Invalid payload received by worker");
+            res.status(400).send("Bad Request: Missing uid or symbols.");
+            return;
+        }
+
+        console.log(`Worker started for user: ${uid}, symbols: ${symbols.join(', ')}`);
+        
+        // --- Part 1: 更新 Metadata ---
+        for (const symbol of symbols) {
+            const metadataRef = db.collection("stock_metadata").doc(symbol);
+            const query = db.collectionGroup("transactions").where("symbol", "==", symbol).orderBy("date", "asc").limit(1);
+            const snapshot = await query.get();
+            
+            if (snapshot.empty) {
+                await metadataRef.delete();
+            } else {
+                const earliestDate = snapshot.docs[0].data().date;
+                await metadataRef.set({
+                  earliestTxDate: earliestDate,
+                  symbol: symbol,
+                  lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+            }
+        }
+        
+        const globalMetaRef = db.collection("stock_metadata").doc("--GLOBAL--");
+        const globalQuery = db.collectionGroup("transactions").orderBy("date", "asc").limit(1);
+        const globalSnapshot = await globalQuery.get();
+        if (globalSnapshot.empty) {
+            await globalMetaRef.delete();
+        } else {
+            const globalEarliestDate = globalSnapshot.docs[0].data().date;
+            await globalMetaRef.set({ earliestTxDate: globalEarliestDate }, { merge: true });
+        }
+        console.log(`Metadata updated for user: ${uid}`);
+
+        // --- Part 2: 執行主計算流程 ---
+        await performRecalculation(uid);
+        console.log(`Recalculation finished for user: ${uid}`);
+
+        res.status(200).send("Task processed successfully.");
+
+    } catch (error) {
+        console.error("Worker failed:", error);
+        res.status(500).send("Task failed and will be retried.");
+    }
+});
+
+
+// 其他輕量級觸發器
 exports.onBenchmarkUpdate = functions.firestore
     .document('users/{uid}/controls/benchmark_control')
     .onWrite(async (chg, ctx) => {
@@ -609,110 +706,27 @@ exports.onBenchmarkUpdate = functions.firestore
         const data = chg.after.data();
         const uid = ctx.params.uid;
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-        console.log(`[${uid}] User requested benchmark update to ${data.symbol}.`);
         
         await getMarketDataFromDb([], data.symbol, (msg) => console.log(`[Benchmark Pre-fetch] ${msg}`));
         
-        console.log(`[${uid}] Pre-fetch for ${data.symbol} complete. Now triggering recalculation.`);
         await holdingsRef.set({
             benchmarkSymbol: data.symbol,
-            force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp()
+            force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() // This triggers performRecalculation directly
         }, { merge: true });
         
         return chg.after.ref.delete();
     });
 
-const triggerUserRecalculation = (ctx) => {
-    return db.doc(`users/${ctx.params.uid}/user_data/current_holdings`)
-      .set({ force_recalc_timestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-}
-
-exports.recalculateOnSplit = functions.firestore
-  .document("users/{uid}/splits/{splitId}")
-  .onWrite((_, ctx) => triggerUserRecalculation(ctx));
-
-// BUG FIX: 此函式現在同時維護個股與全域 metadata
-exports.updateMetadataAndTriggerRecalc = functions.firestore
-  .document("users/{uid}/transactions/{txId}")
-  .onWrite(async (change, context) => {
-    const beforeData = change.before.data();
-    const afterData = change.after.data();
-    const symbols = new Set();
-    if (beforeData) symbols.add(beforeData.symbol.toUpperCase());
-    if (afterData) symbols.add(afterData.symbol.toUpperCase());
-
-    console.log(`Transaction changed. Updating metadata for symbols: ${Array.from(symbols).join(', ')}`);
-
-    for (const symbol of symbols) {
-      const metadataRef = db.collection("stock_metadata").doc(symbol);
-      const query = db.collectionGroup("transactions").where("symbol", "==", symbol).orderBy("date", "asc").limit(1);
-      const snapshot = await query.get();
-      
-      if (snapshot.empty) {
-        console.log(`No transactions left for ${symbol}. Deleting metadata.`);
-        await metadataRef.delete();
-      } else {
-        const earliestDate = snapshot.docs[0].data().date;
-        console.log(`Earliest transaction for ${symbol} is now ${toDate(earliestDate).toISOString()}. Updating metadata.`);
-        await metadataRef.set({
-          earliestTxDate: earliestDate,
-          symbol: symbol,
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-      }
-    }
-
-    // 更新全域 metadata
-    const globalMetaRef = db.collection("stock_metadata").doc("--GLOBAL--");
-    const globalQuery = db.collectionGroup("transactions").orderBy("date", "asc").limit(1);
-    const globalSnapshot = await globalQuery.get();
-    if (globalSnapshot.empty) {
-        console.log("No transactions left in system. Deleting global metadata.");
-        await globalMetaRef.delete();
-    } else {
-        const globalEarliestDate = globalSnapshot.docs[0].data().date;
-        console.log(`Global earliest date is now ${toDate(globalEarliestDate).toISOString()}. Updating global metadata.`);
-        await globalMetaRef.set({ earliestTxDate: globalEarliestDate }, { merge: true });
+// 監聽總計算結果，觸發主計算流程
+exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
+  .firestore.document("users/{uid}/user_data/current_holdings")
+  .onWrite(async (chg, ctx) => {
+    const afterData = chg.after.data();
+    if (!afterData) return null;
+    
+    if (afterData.force_recalc_timestamp && afterData.force_recalc_timestamp !== chg.before.data()?.force_recalc_timestamp) {
+      await performRecalculation(ctx.params.uid);
     }
     
-    console.log(`Metadata updated. Triggering recalculation for user ${context.params.uid}`);
-    await triggerUserRecalculation(context);
-
-    return null;
-  });
-
-// 全域價格更新觸發器
-exports.recalculateOnPriceUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
-  .firestore.document("price_history/{symbol}")
-  .onWrite(async (chg, ctx) => {
-    const s = ctx.params.symbol.toUpperCase();
-    const query1 = db.collectionGroup("transactions").where("symbol", "==", s);
-    const query2 = db.collectionGroup("current_holdings").where("benchmarkSymbol", "==", s);
-    
-    const [txSnap, benchmarkUsersSnap] = await Promise.all([query1.get(), query2.get()]);
-    
-    const usersFromTx = txSnap.docs.map(d => d.ref.path.split("/")[1]);
-    const usersFromBenchmark = benchmarkUsersSnap.docs.map(d => d.ref.path.split("/")[1]);
-    
-    const users = new Set([...usersFromTx, ...usersFromBenchmark].filter(Boolean));
-    if (users.size === 0) return null;
-
-    console.log(`Price update for ${s}. Triggering recalc for ${users.size} users.`);
-    const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
-    return null;
-  });
-
-exports.recalculateOnFxUpdate = functions.runWith({ timeoutSeconds: 240, memory: "1GB" })
-  .firestore.document("exchange_rates/{fxSym}")
-  .onWrite(async (chg, ctx) => {
-    const txSnap = await db.collectionGroup("transactions").get();
-    if (txSnap.empty) return null;
-    const users = new Set(txSnap.docs.map(d => d.ref.path.split("/")[1]).filter(Boolean));
-    if (users.size === 0) return null;
-
-    console.log(`FX rate for ${ctx.params.fxSym} updated. Triggering recalc for all ${users.size} active users.`);
-    const ts = admin.firestore.FieldValue.serverTimestamp();
-    await Promise.all([...users].map(uid => db.doc(`users/${uid}/user_data/current_holdings`).set({ force_recalc_timestamp: ts }, { merge: true })));
     return null;
   });
