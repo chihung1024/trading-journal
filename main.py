@@ -3,7 +3,7 @@ import yfinance as yf
 import firebase_admin
 from firebase_admin import credentials, firestore, get_app
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import pandas as pd
 import time
 
@@ -13,11 +13,13 @@ def initialize_firebase():
         get_app()
     except ValueError:
         try:
+            # Priority for GitHub Actions: read from environment variable
             service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
             cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
             print("Firebase initialized successfully from environment variable.")
         except Exception as e1:
+            # Fallback for local development: try a local file
             print(f"Could not initialize from environment variable ({e1}). Trying local file 'serviceAccountKey.json'...")
             try:
                 cred = credentials.Certificate("serviceAccountKey.json")
@@ -33,6 +35,7 @@ def get_all_symbols_to_update(db):
     """Gathers all unique symbols from user transactions and benchmark settings."""
     all_symbols = set()
     
+    # 1. Get symbols from all user transactions
     try:
         transactions_group = db.collection_group("transactions")
         for trans_doc in transactions_group.stream():
@@ -43,6 +46,7 @@ def get_all_symbols_to_update(db):
     except Exception as e:
         print(f"Warning: Could not read transactions. Error: {e}")
         
+    # 2. Get benchmark symbols from all user holdings
     try:
         holdings_group = db.collection_group("current_holdings")
         for holding_doc in holdings_group.stream():
@@ -58,44 +62,31 @@ def get_all_symbols_to_update(db):
     return final_list
 
 def fetch_and_update_market_data(db, symbols):
-    common_symbols = ["TWD=X"]
-    all_symbols_to_update = list(set(symbols + common_symbols))
+    """
+    Fetches market data for a list of symbols with a retry mechanism
+    and overwrites the data in Firestore for maximum robustness.
+    """
+    # Always include the TWD exchange rate in the update list
+    all_symbols_to_update = list(set(symbols + ["TWD=X"]))
     
     for symbol in all_symbols_to_update:
         if not symbol: continue
         
         print(f"--- Processing: {symbol} ---")
         
-        start_date = None
-        is_common_symbol = symbol in common_symbols or "=" in symbol
-
-        try:
-            if not is_common_symbol:
-                metadata_ref = db.collection("stock_metadata").document(symbol).get()
-                if metadata_ref.exists:
-                    earliest_tx_date = metadata_ref.to_dict().get("earliestTxDate")
-                    if earliest_tx_date:
-                        if hasattr(earliest_tx_date, 'replace'):
-                            earliest_dt = earliest_tx_date.replace(tzinfo=None)
-                            start_dt = earliest_dt - timedelta(days=30)
-                            start_date = start_dt.strftime('%Y-%m-%d')
-                            print(f"Found metadata for stock {symbol}. Fetching from {start_date}.")
-            else:
-                print(f"Symbol {symbol} is a common symbol, fetching MAX history.")
-
-        except Exception as e:
-            print(f"Could not read metadata for {symbol}, falling back to max period. Error: {e}")
-
+        # Retry mechanism for fetching data
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 stock = yf.Ticker(symbol)
-                hist = stock.history(start=start_date, interval="1d", auto_adjust=False, back_adjust=False)
+                # Fetch full history to ensure data integrity and self-heal any gaps
+                hist = stock.history(period="max", interval="1d", auto_adjust=False, back_adjust=False)
                 
                 if hist.empty:
-                    print(f"Warning: No history found for {symbol}.")
-                    break
+                    print(f"Warning: No history found for {symbol}. It might be a delisted or invalid ticker.")
+                    break # No point in retrying if history is empty
 
+                # If successful, break the retry loop
                 print(f"Successfully fetched data for {symbol} on attempt {attempt + 1}.")
                 
                 prices = {idx.strftime('%Y-%m-%d'): val for idx, val in hist['Close'].items() if pd.notna(val)}
@@ -110,16 +101,16 @@ def fetch_and_update_market_data(db, symbols):
                     "prices": prices,
                     "dividends": dividends,
                     "lastUpdated": datetime.now().isoformat(),
-                    "dataSource": "yfinance-daily-refresh-final"
+                    "dataSource": "yfinance-daily-full-refresh-v5"
                 }
                 if is_forex:
                     payload["rates"] = payload.pop("prices")
                     del payload["dividends"]
-                
+
                 payload["splits"] = {}
 
-                doc_ref.set(payload, merge=True)
-                print(f"Successfully wrote price/dividend data for {symbol} to Firestore.")
+                doc_ref.set(payload)
+                print(f"Successfully wrote full price/dividend data for {symbol} to Firestore.")
                 break
 
             except Exception as e:
