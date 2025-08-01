@@ -2,15 +2,19 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
+    // 根規則：預設情況下，使用者只能操作自己的文件夾
     match /users/{userId}/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
     
+    // 保護 user_data 子集合，只允許後端(透過 client SDK 則是 admin)寫入
+    // 前端 client 只能讀取
     match /users/{userId}/user_data/{docId=**} {
         allow read: if request.auth != null && request.auth.uid == userId;
         allow write: if false; 
     }
     
+    // 明確允許使用者新增/刪除/修改自己的交易和拆股紀錄
     match /users/{userId}/transactions/{txId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
     }
@@ -18,15 +22,12 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
     }
     
+    // 允許使用者寫入 controls 文件夾，以觸發 benchmark 更新
     match /users/{userId}/controls/{controlId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    match /stock_metadata/{symbol} {
-      allow read: if request.auth != null;
-      allow write: if false;
-    }
-
+    // 價格和匯率數據，所有登入使用者皆可讀取，但不允許客戶端寫入
     match /price_history/{symbol} {
       allow read: if request.auth != null;
       allow write: if false;
