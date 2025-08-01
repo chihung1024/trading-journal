@@ -560,62 +560,6 @@ async function performRecalculation(uid) {
 
 
 // --- Triggers ---
-/**
- * 監聽來自客戶端的強制刷新請求
- * 這個函數會找到使用者所有的股票代碼，然後強制重新抓取它們的價格
- * 這會自動觸發 recalculateOnPriceUpdate 來進行後續計算
- */
-exports.requestPriceRefresh = functions.runWith({ timeoutSeconds: 180, memory: "512MB" })
-    .firestore.document('users/{uid}/controls/refresh_control')
-    .onWrite(async (chg, ctx) => {
-        // 如果是刪除事件或沒有新資料，則不做任何事
-        if (!chg.after.exists) return null;
-
-        const uid = ctx.params.uid;
-        const log = (msg) => console.log(`[Refresh Request - ${uid}] ${msg}`);
-        
-        log(`Received force refresh request.`);
-
-        try {
-            const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-            const holdingsSnap = await holdingsRef.get();
-
-            if (!holdingsSnap.exists) {
-                log("User has no holdings document. Nothing to refresh.");
-                return null;
-            }
-
-            const holdingsData = holdingsSnap.data();
-            const holdingSymbols = Object.keys(holdingsData.holdings || {});
-            const benchmarkSymbol = holdingsData.benchmarkSymbol || null;
-
-            const symbolsToUpdate = [...new Set([...holdingSymbols, benchmarkSymbol])].filter(Boolean);
-
-            if (symbolsToUpdate.length === 0) {
-                log("No symbols to refresh.");
-                return null;
-            }
-
-            log(`Found symbols to refresh: ${symbolsToUpdate.join(', ')}`);
-
-            // 平行地為所有代碼抓取最新資料
-            const fetchPromises = symbolsToUpdate.map(symbol => 
-                fetchAndSaveMarketData(symbol, log)
-            );
-            await Promise.all(fetchPromises);
-            
-            log("All symbols have been force-refreshed. Existing triggers will handle recalculation.");
-
-        } catch (error) {
-            log(`CRITICAL ERROR during price refresh: ${error.message}`);
-        } finally {
-            // 刪除控制文件，以便下次可以再次觸發
-            await chg.after.ref.delete();
-        }
-        
-        return null;
-    });
-
 exports.recalculatePortfolio = functions.runWith({ timeoutSeconds: 300, memory: "1GB" })
   .firestore.document("users/{uid}/user_data/current_holdings")
   .onWrite(async (chg, ctx) => {
