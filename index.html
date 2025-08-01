@@ -30,6 +30,9 @@
                 <div class="flex items-center space-x-3">
                     <i data-lucide="line-chart" class="text-indigo-600 h-8 w-8"></i>
                     <h1 class="text-2xl font-bold text-gray-800">交易紀錄與資產分析 (TWR 最終版)</h1>
+                    <button id="force-refresh-btn" title="強制更新最新報價" class="btn p-2 text-gray-500 hover:text-indigo-600 hover:bg-indigo-100 rounded-full">
+                        <i data-lucide="refresh-cw" class="h-5 w-5"></i>
+                    </button>
                 </div>
                 <div id="auth-status-display" class="flex items-center space-x-4 text-xs text-gray-500 text-right">
                     <div id="user-info" class="hidden">
@@ -296,6 +299,7 @@
             document.getElementById('register-btn').addEventListener('click', handleRegister);
             document.getElementById('logout-btn').addEventListener('click', handleLogout);
             document.getElementById('update-benchmark-btn').addEventListener('click', handleUpdateBenchmark);
+            document.getElementById('force-refresh-btn').addEventListener('click', handleForceRefresh);
         }
 
         async function handleUpdateBenchmark() {
@@ -317,6 +321,40 @@
             } catch (error) {
                 console.error("更新 Benchmark 失敗:", error);
                 showNotification('error', `更新 Benchmark 失敗: ${error.message}`);
+            }
+        }
+
+        async function handleForceRefresh() {
+            if (!userId) {
+                showNotification('error', '請先登入後再操作。');
+                return;
+            }
+
+            const refreshBtn = document.getElementById('force-refresh-btn');
+            const icon = refreshBtn.querySelector('i');
+
+            // 禁用按鈕並顯示讀取中動畫
+            refreshBtn.disabled = true;
+            icon.classList.add('animate-spin');
+            showNotification('info', '已送出請求，正在強制從網路抓取最新報價...');
+
+            const refreshControlRef = doc(db, 'users', userId, 'controls', 'refresh_control');
+            try {
+                // 向後端發送訊號
+                await setDoc(refreshControlRef, { requestedAt: serverTimestamp() });
+                // 注意：我們不需要在這裡做任何事了，後端會接手
+                // 為了避免使用者體驗不良，設定一個超時來恢復按鈕狀態
+                setTimeout(() => {
+                    if(refreshBtn.disabled) {
+                       refreshBtn.disabled = false;
+                       icon.classList.remove('animate-spin');
+                    }
+                }, 20000); // 20秒後無論如何都解鎖按鈕
+            } catch (error) {
+                console.error("送出強制更新請求失敗:", error);
+                showNotification('error', `請求失敗: ${error.message}`);
+                refreshBtn.disabled = false;
+                icon.classList.remove('animate-spin');
             }
         }
         
@@ -365,6 +403,13 @@
                 renderHoldingsTable(currentHoldings);
                 updateDashboard(currentHoldings, currentRealizedPL, currentOverallReturn, currentXIRR);
                 checkInitialLoad();
+
+                const refreshBtn = document.getElementById('force-refresh-btn');
+                if (refreshBtn.disabled) {
+                    refreshBtn.disabled = false;
+                    refreshBtn.querySelector('i').classList.remove('animate-spin');
+                    showNotification('success', '資產數據已同步為最新！');
+                }
             }, (error) => console.error("讀取持股資料失敗:", error));
 
             const historyDocRef = doc(db, 'users', userId, 'user_data', 'portfolio_history');
