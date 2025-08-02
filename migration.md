@@ -44,9 +44,6 @@
 
 ### A. 即時計算流程 (當使用者新增一筆交易時)
 
-![即時計算流程圖](https://placehold.co/800x400/F0F2F5/333333?text=Real-time%20Calculation%20Flow%20Diagram)
-*一個描述即時計算流程的示意圖*
-
 1.  **[T=0s] 前端 (Pages)** → 呼叫 → **CF Worker** 的 `/api/transactions` 端點。
 2.  **[T=1s] CF Worker** → 檢查 **D1**，若需新數據，則呼叫 → **Vercel Function**。
 3.  **[T=~8s] Vercel** → 返回價格數據 → **CF Worker**。
