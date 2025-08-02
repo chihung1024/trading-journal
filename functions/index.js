@@ -50,17 +50,25 @@ function findFxRate(market, currency, date, tolerance = 15) {
 
 // --- 核心計算函式 ---
 
+// [關鍵修正] 此函式現在會考慮「未來」的拆股事件，以匹配 yfinance 的前復權股價
 function getPortfolioStateOnDate(allEvts, targetDate) {
     const state = {};
-    const pastEvents = allEvts.filter(e => toDate(e.date) <= toDate(targetDate));
+    const targetDateObj = toDate(targetDate);
 
+    // 1. 篩選出在目標日期或之前發生的事件
+    const pastEvents = allEvts.filter(e => toDate(e.date) <= targetDateObj);
+    
+    // 2. 篩選出在目標日期之後發生的「未來」拆股事件
+    const futureSplits = allEvts.filter(e => e.eventType === 'split' && toDate(e.date) > targetDateObj);
+
+    // 3. 根據過去的事件，建立當日的基礎持股狀態 (FIFO 買賣, 過去的拆股)
     for (const e of pastEvents) {
         const sym = e.symbol.toUpperCase();
         if (!state[sym]) state[sym] = { lots: [], currency: e.currency || "USD" };
         
         if (e.eventType === 'transaction') {
             state[sym].currency = e.currency;
-            const costPerShareTWD = getTotalCost(e) / (e.quantity || 1); // Cost in original currency, FX applied later
+            const costPerShareTWD = getTotalCost(e) / (e.quantity || 1);
 
             if (e.type === 'buy') {
                 state[sym].lots.push({ quantity: e.quantity, pricePerShareTWD: costPerShareTWD });
@@ -78,22 +86,37 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
                 }
             }
         } else if (e.eventType === 'split') {
+            // 過去發生的拆股會影響股數和成本基礎
             state[sym].lots.forEach(lot => {
                 lot.quantity *= e.ratio;
                 lot.pricePerShareTWD /= e.ratio;
             });
         }
     }
+
+    // 4. [CRITICAL FIX] 為了匹配 yfinance 的「前復權」股價，我們必須將「未來」的拆股事件應用到目前的股數上。
+    for (const sym in state) {
+        const relevantFutureSplits = futureSplits.filter(s => s.symbol.toUpperCase() === sym);
+        
+        if (relevantFutureSplits.length > 0) {
+            // 累計所有未來的拆股比例
+            const totalFutureRatio = relevantFutureSplits.reduce((acc, split) => acc * split.ratio, 1);
+            
+            // 只調整股數，不調整成本基礎，因為成本是歷史事實
+            state[sym].lots.forEach(lot => {
+                lot.quantity *= totalFutureRatio;
+            });
+        }
+    }
+
     return state;
 }
 
-// **[優化]** 此函式現在只專注於計算「單一資產在某一天的價值」，不再處理遞迴
 function getAssetValueOnDate(symbol, assetState, market, date) {
     const qty = assetState.lots.reduce((sum, lot) => sum + lot.quantity, 0);
-    if (qty < 1e-9) return 0; // 如果沒有股數，價值為 0
+    if (qty < 1e-9) return 0; 
 
     const price = findNearest(market[symbol]?.prices, date);
-    // 如果找不到價格 (例如：股票已下市或數據中斷)，則當日價值視為 0
     if (price === undefined) {
         return undefined; 
     }
@@ -102,12 +125,11 @@ function getAssetValueOnDate(symbol, assetState, market, date) {
     return qty * price * (assetState.currency === "TWD" ? 1 : fx);
 }
 
-// **[優化]** 重構此函式，使其邏輯更清晰，並能妥善處理價格空缺日
 function calculateDailyPortfolioValues(evts, market, startDate, log) {
     if (!startDate) return {};
 
     const history = {};
-    const lastKnownAssetValues = {}; // 用來儲存每個資產最後一次計算出的市值
+    const lastKnownAssetValues = {}; 
     let curDate = new Date(startDate);
     curDate.setUTCHours(0, 0, 0, 0);
     const today = new Date();
@@ -120,14 +142,12 @@ function calculateDailyPortfolioValues(evts, market, startDate, log) {
 
         for (const symbol in stateOnDate) {
             const assetState = stateOnDate[symbol];
-            const assetValue = getAssetValueOnDate(symbol, assetState, market, curDate);
+            const assetValue = getAssetValueOnDate(symbol.toUpperCase(), assetState, market, curDate);
 
             if (assetValue !== undefined) {
-                // 如果今天能成功計算價值，則更新總價值和最後已知價值
                 totalPortfolioValue += assetValue;
                 lastKnownAssetValues[symbol] = assetValue;
             } else {
-                // 如果今天算不出價值 (e.g., 價格缺失)，則沿用該資產的「最後已知價值」
                 totalPortfolioValue += (lastKnownAssetValues[symbol] || 0);
             }
         }
@@ -168,8 +188,9 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
             const cost = getTotalCost(e);
             flow = (e.type === 'buy' ? 1 : -1) * cost * (currency === 'TWD' ? 1 : fx);
         } else if (e.eventType === 'dividend') {
-            const stateOnDate = getPortfolioStateOnDate(evts, toDate(e.date));
-            const shares = stateOnDate[e.symbol.toUpperCase()]?.lots.reduce((sum, lot) => sum + lot.quantity, 0) || 0;
+            // 注意：為了正確計算股息，我們需要「未經未來拆股調整」的當日股數
+            const stateOnDividendData = getPortfolioStateOnDate(evts.filter(evt => evt.eventType !== 'split' || toDate(evt.date) <= toDate(e.date)), toDate(e.date));
+            const shares = stateOnDividendData[e.symbol.toUpperCase()]?.lots.reduce((sum, lot) => sum + lot.quantity, 0) || 0;
             if (shares > 0) {
                 const taxRate = isTwStock(e.symbol) ? 0.0 : 0.30;
                 const postTaxAmount = e.amount * (1 - taxRate);
@@ -192,9 +213,11 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
         const CF = cashflows[dateStr] || 0; 
 
         const denominator = lastMarketValue + CF;
-        if (denominator !== 0 && MVE !== 0) { // 避免除以零
+        if (denominator !== 0 && MVE !== 0) {
             const periodReturn = MVE / denominator;
-            cumulativeHpr *= periodReturn;
+            if(isFinite(periodReturn)) { // 增加保護，防止無限值
+                cumulativeHpr *= periodReturn;
+            }
         }
 
         twrHistory[dateStr] = (cumulativeHpr - 1) * 100;
@@ -216,18 +239,19 @@ function calculateFinalHoldings(pf, market) {
 
   for (const sym in pf) {
     const h = pf[sym];
-    const qty = h.lots.reduce((s, l) => s + l.quantity, 0);
-    
+    // 使用未經未來拆股調整的股數來計算當前持倉
+    const stateToday = getPortfolioStateOnDate(pf[sym].allEvents, today);
+    const qty = stateToday.lots.reduce((s, l) => s + l.quantity, 0);
+
     if (qty > 1e-9) {
-        const totCostTWD = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareTWD, 0);
-        const totCostOrg = h.lots.reduce((s, l) => s + l.quantity * l.pricePerShareOriginal, 0);
+        const totCostTWD = stateToday.lots.reduce((s, l) => s + l.quantity * l.pricePerShareTWD, 0);
+        const totCostOrg = stateToday.lots.reduce((s, l) => s + l.quantity * l.pricePerShareOriginal, 0);
+        
         const priceHist = market[sym]?.prices || {};
         const curPrice = findNearest(priceHist, today);
         const fx = findFxRate(market, h.currency, today);
         const mktVal = qty * (curPrice ?? 0) * (h.currency === "TWD" ? 1 : fx);
         const unreal = mktVal - totCostTWD;
-        const invested = totCostTWD + h.realizedCostTWD;
-        const totalRet = unreal + h.realizedPLTWD;
         const rrCurrent = totCostTWD > 0 ? (unreal / totCostTWD) * 100 : 0;
 
         holdingsToUpdate[sym] = {
@@ -256,10 +280,10 @@ function createCashflowsForXirr(evts, holdings, market) {
         flows.push({ date: toDate(t.date), amount: t.type === "buy" ? -amt : amt });
     });
     evts.filter(e => e.eventType === "dividend").forEach(d => {
-        const stateOnDate = getPortfolioStateOnDate(evts, toDate(d.date));
+        const stateOnDividendData = getPortfolioStateOnDate(evts.filter(evt => evt.eventType !== 'split' || toDate(evt.date) <= toDate(d.date)), toDate(d.date));
         const sym = d.symbol.toUpperCase();
-        const currency = stateOnDate[sym]?.currency || 'USD';
-        const shares = stateOnDate[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
+        const currency = stateOnDividendData[sym]?.currency || 'USD';
+        const shares = stateOnDividendData[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
         if (shares > 0) {
             const fx = findFxRate(market, currency, toDate(d.date));
             const taxRate = isTwStock(sym) ? 0.0 : 0.30;
@@ -309,6 +333,16 @@ function calculateXIRR(flows) {
 function calculateCoreMetrics(evts, market, log) {
     const pf = {};
     let totalRealizedPL = 0;
+    
+    // Group all events by symbol for final holdings calculation
+    const eventsBySymbol = evts.reduce((acc, e) => {
+        const sym = e.symbol.toUpperCase();
+        if(!acc[sym]) acc[sym] = { lots: [], currency: e.currency || "USD", realizedPLTWD: 0, realizedCostTWD: 0, allEvents: [] };
+        acc[sym].allEvents.push(e);
+        acc[sym].currency = e.currency || acc[sym].currency;
+        return acc;
+    }, {});
+
     for (const e of evts) {
         const sym = e.symbol.toUpperCase();
         if (!pf[sym]) pf[sym] = { lots: [], currency: e.currency || "USD", realizedPLTWD: 0, realizedCostTWD: 0 };
@@ -340,6 +374,7 @@ function calculateCoreMetrics(evts, market, log) {
                     totalRealizedPL += realized;
                     pf[sym].realizedCostTWD += costOfGoodsSoldTWD;
                     pf[sym].realizedPLTWD += realized;
+                    eventsBySymbol[sym].realizedPLTWD += realized;
                 }
                 break;
             }
@@ -351,8 +386,8 @@ function calculateCoreMetrics(evts, market, log) {
                 });
                 break;
             case "dividend": {
-                const stateOnDate = getPortfolioStateOnDate(evts, toDate(e.date));
-                const shares = stateOnDate[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
+                const stateOnDividendData = getPortfolioStateOnDate(evts.filter(evt => evt.eventType !== 'split' || toDate(evt.date) <= toDate(e.date)), toDate(e.date));
+                const shares = stateOnDividendData[sym]?.lots.reduce((s, l) => s + l.quantity, 0) || 0;
                 if (shares > 0) {
                     const fx = findFxRate(market, pf[sym].currency, toDate(e.date));
                     const taxRate = isTwStock(sym) ? 0.0 : 0.30;
@@ -360,12 +395,13 @@ function calculateCoreMetrics(evts, market, log) {
                     const divTWD = postTaxAmount * shares * (pf[sym].currency === "TWD" ? 1 : fx);
                     totalRealizedPL += divTWD;
                     pf[sym].realizedPLTWD += divTWD;
+                    eventsBySymbol[sym].realizedPLTWD += divTWD;
                 }
                 break;
             }
         }
     }
-    const { holdingsToUpdate, holdingsToDelete } = calculateFinalHoldings(pf, market);
+    const { holdingsToUpdate, holdingsToDelete } = calculateFinalHoldings(eventsBySymbol, market);
     const xirrFlows = createCashflowsForXirr(evts, holdingsToUpdate, market);
     const xirr = calculateXIRR(xirrFlows);
     const totalUnrealizedPL = Object.values(holdingsToUpdate).reduce((sum, h) => sum + h.unrealizedPLTWD, 0);
@@ -389,7 +425,7 @@ async function fetchAndSaveMarketData(symbol, log) {
         return acc;
     }, {});
     
-    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v8" };
+    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v9-split-fix" };
     if (symbol.includes("=")) {
       payload.rates = payload.prices;
       delete payload.dividends;
@@ -449,7 +485,7 @@ async function performRecalculation(uid) {
     };
 
     try {
-        log("--- Recalculation Process Start (Robust v8 - Refactored Daily Value) ---");
+        log("--- Recalculation Process Start (v9 - Split-Aware Valuation) ---");
 
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
@@ -496,7 +532,6 @@ async function performRecalculation(uid) {
         
         const { holdingsToUpdate, holdingsToDelete } = portfolioResult.holdings;
         
-        // 使用 set 和 merge:true 來建立或更新文件，同時能夠刪除欄位
         const finalHoldingsPayload = {
             ...holdingsToUpdate
         };
@@ -522,7 +557,6 @@ async function performRecalculation(uid) {
         logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
     } finally {
         await logRef.set({ entries: logs });
-        // 在 finally 區塊中安全地刪除觸發戳記
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.delete() }, { merge: true })
             .catch(err => log(`Could not delete timestamp: ${err.message}`));
