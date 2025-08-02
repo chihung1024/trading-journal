@@ -53,7 +53,6 @@ function findFxRate(market, currency, date, tolerance = 15) {
 function getPortfolioStateOnDate(allEvts, targetDate) {
     const state = {};
     const pastEvents = allEvts.filter(e => toDate(e.date) <= toDate(targetDate));
-    const futureSplits = allEvts.filter(e => e.eventType === 'split' && toDate(e.date) > toDate(targetDate));
 
     for (const e of pastEvents) {
         const sym = e.symbol.toUpperCase();
@@ -61,8 +60,7 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
         
         if (e.eventType === 'transaction') {
             state[sym].currency = e.currency;
-            const fx = 1; 
-            const costPerShareTWD = getTotalCost(e) / (e.quantity || 1) * fx;
+            const costPerShareTWD = getTotalCost(e) / (e.quantity || 1); // Cost in original currency, FX applied later
 
             if (e.type === 'buy') {
                 state[sym].lots.push({ quantity: e.quantity, pricePerShareTWD: costPerShareTWD });
@@ -86,86 +84,60 @@ function getPortfolioStateOnDate(allEvts, targetDate) {
             });
         }
     }
-
-    for (const sym in state) {
-        futureSplits
-            .filter(s => s.symbol.toUpperCase() === sym)
-            .forEach(split => {
-                state[sym].lots.forEach(lot => {
-                    lot.quantity *= split.ratio;
-                });
-            });
-    }
-
     return state;
 }
 
-function dailyValue(state, market, date) {
-    return Object.keys(state).reduce((totalValue, sym) => {
-        const s = state[sym];
-        const qty = s.lots.reduce((sum, lot) => sum + lot.quantity, 0);
-        if (qty < 1e-9) return totalValue;
-        
-        const price = findNearest(market[sym]?.prices, date);
-        if (price === undefined) {
-             const yesterday = new Date(date);
-             yesterday.setDate(yesterday.getDate() - 1);
-             const firstEventDate = toDate(s.lots[0]?.date || date);
-             if (yesterday < firstEventDate) return totalValue;
-             return totalValue + dailyValue({[sym]: s}, market, yesterday);
-        }
-        
-        const fx = findFxRate(market, s.currency, date);
-        return totalValue + (qty * price * (s.currency === "TWD" ? 1 : fx));
-    }, 0);
+// **[優化]** 此函式現在只專注於計算「單一資產在某一天的價值」，不再處理遞迴
+function getAssetValueOnDate(symbol, assetState, market, date) {
+    const qty = assetState.lots.reduce((sum, lot) => sum + lot.quantity, 0);
+    if (qty < 1e-9) return 0; // 如果沒有股數，價值為 0
+
+    const price = findNearest(market[symbol]?.prices, date);
+    // 如果找不到價格 (例如：股票已下市或數據中斷)，則當日價值視為 0
+    if (price === undefined) {
+        return undefined; 
+    }
+
+    const fx = findFxRate(market, assetState.currency, date);
+    return qty * price * (assetState.currency === "TWD" ? 1 : fx);
 }
 
-function prepareEvents(txs, splits, market) {
-    const firstBuyDateMap = {};
-    txs.forEach(tx => {
-        if (tx.type === "buy") {
-            const sym = tx.symbol.toUpperCase();
-            const d = toDate(tx.date);
-            if (!firstBuyDateMap[sym] || d < firstBuyDateMap[sym]) firstBuyDateMap[sym] = d;
-        }
-    });
-
-    const evts = [
-        ...txs.map(t => ({ ...t, date: toDate(t.date), eventType: "transaction" })),
-        ...splits.map(s => ({ ...s, date: toDate(s.date), eventType: "split" }))
-    ];
-
-    Object.keys(market).forEach(sym => {
-        if (market[sym] && market[sym].dividends) {
-            Object.entries(market[sym].dividends).forEach(([dateStr, amount]) => {
-                const dividendDate = new Date(dateStr);
-                if (firstBuyDateMap[sym] && dividendDate >= firstBuyDateMap[sym] && amount > 0) {
-                    evts.push({ date: dividendDate, symbol: sym, amount, eventType: "dividend" });
-                }
-            });
-        }
-    });
-
-    evts.sort((a, b) => toDate(a.date) - toDate(b.date));
-    const firstTx = evts.find(e => e.eventType === 'transaction');
-    return { evts, firstBuyDate: firstTx ? toDate(firstTx.date) : null, firstBuyDateMap };
-}
-
+// **[優化]** 重構此函式，使其邏輯更清晰，並能妥善處理價格空缺日
 function calculateDailyPortfolioValues(evts, market, startDate, log) {
     if (!startDate) return {};
+
+    const history = {};
+    const lastKnownAssetValues = {}; // 用來儲存每個資產最後一次計算出的市值
     let curDate = new Date(startDate);
     curDate.setUTCHours(0, 0, 0, 0);
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
-    const history = {};
+
     while (curDate <= today) {
         const dateStr = curDate.toISOString().split("T")[0];
         const stateOnDate = getPortfolioStateOnDate(evts, curDate);
-        history[dateStr] = dailyValue(stateOnDate, market, curDate);
+        let totalPortfolioValue = 0;
+
+        for (const symbol in stateOnDate) {
+            const assetState = stateOnDate[symbol];
+            const assetValue = getAssetValueOnDate(symbol, assetState, market, curDate);
+
+            if (assetValue !== undefined) {
+                // 如果今天能成功計算價值，則更新總價值和最後已知價值
+                totalPortfolioValue += assetValue;
+                lastKnownAssetValues[symbol] = assetValue;
+            } else {
+                // 如果今天算不出價值 (e.g., 價格缺失)，則沿用該資產的「最後已知價值」
+                totalPortfolioValue += (lastKnownAssetValues[symbol] || 0);
+            }
+        }
+
+        history[dateStr] = totalPortfolioValue;
         curDate.setDate(curDate.getDate() + 1);
     }
     return history;
 }
+
 
 function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, startDate, log) {
     const dates = Object.keys(dailyPortfolioValues).sort();
@@ -220,7 +192,7 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
         const CF = cashflows[dateStr] || 0; 
 
         const denominator = lastMarketValue + CF;
-        if (denominator !== 0) {
+        if (denominator !== 0 && MVE !== 0) { // 避免除以零
             const periodReturn = MVE / denominator;
             cumulativeHpr *= periodReturn;
         }
@@ -237,7 +209,6 @@ function calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol
     return { twrHistory, benchmarkHistory };
 }
 
-// FINAL FIX: 修改此函式以區分要更新和要刪除的持股
 function calculateFinalHoldings(pf, market) {
   const holdingsToUpdate = {};
   const holdingsToDelete = [];
@@ -258,16 +229,14 @@ function calculateFinalHoldings(pf, market) {
         const invested = totCostTWD + h.realizedCostTWD;
         const totalRet = unreal + h.realizedPLTWD;
         const rrCurrent = totCostTWD > 0 ? (unreal / totCostTWD) * 100 : 0;
-        const rrTotal = invested > 0 ? (totalRet / invested) * 100 : 0;
+
         holdingsToUpdate[sym] = {
           symbol: sym, quantity: qty, currency: h.currency,
-          avgCostOriginal: totCostOrg > 0 ? totCostOrg / qty : 0, totalCostTWD: totCostTWD, investedCostTWD: invested,
+          avgCostOriginal: totCostOrg > 0 ? totCostOrg / qty : 0, totalCostTWD: totCostTWD,
           currentPriceOriginal: curPrice ?? null, marketValueTWD: mktVal,
-          unrealizedPLTWD: unreal, realizedPLTWD: h.realizedPLTWD,
-          returnRateCurrent: rrCurrent, returnRateTotal: rrTotal, returnRate: rrCurrent
+          unrealizedPLTWD: unreal, returnRate: rrCurrent
         };
     } else {
-        // 如果股數為零，則將其代碼加入待刪除清單
         holdingsToDelete.push(sym);
     }
   }
@@ -420,7 +389,7 @@ async function fetchAndSaveMarketData(symbol, log) {
         return acc;
     }, {});
     
-    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v5" };
+    const payload = { prices, splits: {}, dividends, lastUpdated: admin.firestore.FieldValue.serverTimestamp(), dataSource: "yfinance-on-demand-v8" };
     if (symbol.includes("=")) {
       payload.rates = payload.prices;
       delete payload.dividends;
@@ -480,7 +449,7 @@ async function performRecalculation(uid) {
     };
 
     try {
-        log("--- Recalculation Process Start (Robust v7 - Update/Delete Fix) ---");
+        log("--- Recalculation Process Start (Robust v8 - Refactored Daily Value) ---");
 
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
         const histRef = db.doc(`users/${uid}/user_data/portfolio_history`);
@@ -496,18 +465,18 @@ async function performRecalculation(uid) {
 
         if (txs.length === 0) {
             log("No transactions found. Clearing user data.");
-            const currentHoldings = holdingsSnap.data()?.holdings || {};
             const updatePayload = {
                 holdings: {}, 
                 totalRealizedPL: 0, 
                 xirr: null, 
                 overallReturnRate: 0,
             };
-            // 刪除所有現有的持股
-            for(const symbol in currentHoldings) {
-                updatePayload[`holdings.${symbol}`] = admin.firestore.FieldValue.delete();
+            if(holdingsSnap.exists && holdingsSnap.data().holdings){
+                for(const symbol in holdingsSnap.data().holdings) {
+                    updatePayload[`holdings.${symbol}`] = admin.firestore.FieldValue.delete();
+                }
             }
-            await holdingsRef.update(updatePayload);
+            await holdingsRef.set(updatePayload, { merge: true });
             await histRef.set({ history: {}, twrHistory: {}, benchmarkHistory: {}, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
             return;
         }
@@ -525,24 +494,24 @@ async function performRecalculation(uid) {
         const dailyPortfolioValues = calculateDailyPortfolioValues(evts, market, firstBuyDate, log);
         const { twrHistory, benchmarkHistory } = calculateTwrHistory(dailyPortfolioValues, evts, market, benchmarkSymbol, firstBuyDate, log);
         
-        // FINAL FIX: 使用 update() 和 dot notation 來進行精確的更新與刪除
         const { holdingsToUpdate, holdingsToDelete } = portfolioResult.holdings;
-        const updatePayload = {
-            holdings: holdingsToUpdate,
+        
+        // 使用 set 和 merge:true 來建立或更新文件，同時能夠刪除欄位
+        const finalHoldingsPayload = {
+            ...holdingsToUpdate
+        };
+        holdingsToDelete.forEach(sym => {
+            finalHoldingsPayload[sym] = admin.firestore.FieldValue.delete();
+        });
+
+        await holdingsRef.set({
+            holdings: finalHoldingsPayload,
             totalRealizedPL: portfolioResult.totalRealizedPL,
             xirr: portfolioResult.xirr,
             overallReturnRate: portfolioResult.overallReturnRate,
             benchmarkSymbol: benchmarkSymbol,
             lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-        };
-
-        // 將待刪除的持股加入 payload
-        for (const symbolToDelete of holdingsToDelete) {
-            updatePayload[`holdings.${symbolToDelete}`] = admin.firestore.FieldValue.delete();
-        }
-
-        // 執行一次精確的更新
-        await holdingsRef.update(updatePayload);
+        }, { merge: true });
 
         const historyData = { history: dailyPortfolioValues, twrHistory, benchmarkHistory, lastUpdated: admin.firestore.FieldValue.serverTimestamp() };
         await histRef.set(historyData);
@@ -553,9 +522,42 @@ async function performRecalculation(uid) {
         logs.push(`CRITICAL: ${e.message}\n${e.stack}`);
     } finally {
         await logRef.set({ entries: logs });
+        // 在 finally 區塊中安全地刪除觸發戳記
         const holdingsRef = db.doc(`users/${uid}/user_data/current_holdings`);
-        await holdingsRef.update({ force_recalc_timestamp: admin.firestore.FieldValue.delete() }).catch(err => log(`Could not delete timestamp: ${err.message}`));
+        await holdingsRef.set({ force_recalc_timestamp: admin.firestore.FieldValue.delete() }, { merge: true })
+            .catch(err => log(`Could not delete timestamp: ${err.message}`));
     }
+}
+
+function prepareEvents(txs, splits, market) {
+    const firstBuyDateMap = {};
+    txs.forEach(tx => {
+        if (tx.type === "buy") {
+            const sym = tx.symbol.toUpperCase();
+            const d = toDate(tx.date);
+            if (!firstBuyDateMap[sym] || d < firstBuyDateMap[sym]) firstBuyDateMap[sym] = d;
+        }
+    });
+
+    const evts = [
+        ...txs.map(t => ({ ...t, date: toDate(t.date), eventType: "transaction" })),
+        ...splits.map(s => ({ ...s, date: toDate(s.date), eventType: "split" }))
+    ];
+
+    Object.keys(market).forEach(sym => {
+        if (market[sym] && market[sym].dividends) {
+            Object.entries(market[sym].dividends).forEach(([dateStr, amount]) => {
+                const dividendDate = new Date(dateStr);
+                if (firstBuyDateMap[sym] && dividendDate >= firstBuyDateMap[sym] && amount > 0) {
+                    evts.push({ date: dividendDate, symbol: sym, amount, eventType: "dividend" });
+                }
+            });
+        }
+    });
+
+    evts.sort((a, b) => toDate(a.date) - toDate(b.date));
+    const firstTx = evts.find(e => e.eventType === 'transaction');
+    return { evts, firstBuyDate: firstTx ? toDate(firstTx.date) : null, firstBuyDateMap };
 }
 
 
