@@ -1,3 +1,16 @@
-# stock-data-updater
-
-https://chihung1024.github.io/trading-journal/
+- 📁 trading-journal-1.08/
+  - 📁 trading-journal-1.08/
+    - 📄 README.md
+    - 📄 firebase.json
+    - 📄 firestore.rules
+    - 📄 index.html
+    - 📄 initialize_database.py
+    - 📄 main.py
+    - 📁 .github/
+      - 📁 workflows/
+        - 📄 deploy_functions.yml
+        - 📄 initialize_db.yml
+        - 📄 update_prices.yml
+    - 📁 functions/
+      - 📄 index.js
+      - 📄 package.json
